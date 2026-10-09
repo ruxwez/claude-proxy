@@ -9,17 +9,26 @@
 //
 // Los modelos de tipo "muse-spark" solo se sirven por la Responses API,
 // así que se enrutan a /responses; el resto usa /chat/completions.
+//
+// OpenCode solo sirve el tier gratuito (Zen) a peticiones que parecen venir
+// de su CLI, así que el conector replica su huella exacta (rama 2.0 de
+// packages/opencode/src/session/llm.ts): User-Agent opencode/<versión>,
+// x-opencode-client, x-opencode-session e x-opencode-request, con IDs de
+// sesión y mensaje en el formato nativo de OpenCode (ses_/msg_).
 package opencode
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ruxwez/claude-proxy/internal/anthropic"
@@ -38,22 +47,65 @@ type Connector struct {
 	name       string
 	baseURL    string
 	apiKey     string
+	userAgent  string
+	projectID  string
 	filterFree bool
 	client     *http.Client
 	cache      *connector.ModelCache
 }
 
+// opencodeClient es el valor de x-opencode-client: el nombre del cliente que
+// envía el CLI (Flag.OPENCODE_CLIENT; "acp" para el adaptador ACP).
+const opencodeClient = "cli"
+
+// userAgentSuffix completa el User-Agent con las etiquetas de SDK que envía
+// el CLI real de OpenCode (AI SDK sobre Bun). No son obligatorias para la
+// API, pero hacen la huella idéntica a la del cliente oficial.
+const userAgentSuffix = " ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.0"
+
+// clientUserAgent compone el User-Agent del CLI de OpenCode:
+// "opencode/<versión> ai-sdk/... runtime/bun/...".
+//
+// La API de OpenCode exige este formato (versión >= 1.17.0) para servir el
+// tier gratuito; sin él responde 403 FreeTierError ("OpenCode's free tier
+// can only be used from within OpenCode"). Vacío = versión por defecto.
+func clientUserAgent(version string) string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		v = config.DefaultClientVersion
+	}
+	return "opencode/" + v + userAgentSuffix
+}
+
+// projectIDOrGenerated usa el project ID configurado o, si está vacío, genera
+// uno estable por proceso: OpenCode siempre envía x-opencode-project con el ID
+// del proyecto (la API solo lo usa para agrupar, no lo valida).
+func projectIDOrGenerated(id string) string {
+	if id = strings.TrimSpace(id); id != "" {
+		return id
+	}
+	var b [20]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "global"
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // NewZen crea el conector de OpenCode Zen (solo modelos gratuitos).
-func NewZen(apiKey string, timeout time.Duration) *Connector {
-	return newConnector("opencode-zen", config.ZenBaseURL, apiKey, true, timeout)
+// clientVersion es la versión de CLI anunciada en el User-Agent y projectID
+// el valor de x-opencode-project (vacío = uno generado).
+func NewZen(apiKey, clientVersion, projectID string, timeout time.Duration) *Connector {
+	return newConnector("opencode-zen", config.ZenBaseURL, apiKey, clientVersion, projectID, true, timeout)
 }
 
 // NewGo crea el conector de OpenCode Go (catálogo completo).
-func NewGo(apiKey string, timeout time.Duration) *Connector {
-	return newConnector("opencode-go", config.GoBaseURL, apiKey, false, timeout)
+// clientVersion es la versión de CLI anunciada en el User-Agent y projectID
+// el valor de x-opencode-project (vacío = uno generado).
+func NewGo(apiKey, clientVersion, projectID string, timeout time.Duration) *Connector {
+	return newConnector("opencode-go", config.GoBaseURL, apiKey, clientVersion, projectID, false, timeout)
 }
 
-func newConnector(name, baseURL, apiKey string, filterFree bool, timeout time.Duration) *Connector {
+func newConnector(name, baseURL, apiKey, clientVersion, projectID string, filterFree bool, timeout time.Duration) *Connector {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
@@ -61,6 +113,8 @@ func newConnector(name, baseURL, apiKey string, filterFree bool, timeout time.Du
 		name:       name,
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,
+		userAgent:  clientUserAgent(clientVersion),
+		projectID:  projectIDOrGenerated(projectID),
 		filterFree: filterFree,
 		client:     &http.Client{Timeout: timeout},
 		cache:      connector.NewModelCache(modelCacheTTL),
@@ -92,6 +146,9 @@ func (c *Connector) fetchModels(ctx context.Context) ([]connector.Model, error) 
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	req.Header.Set("Accept", "application/json")
+	// Huella del CLI de OpenCode (misma validación que en Chat).
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("x-opencode-client", opencodeClient)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -142,11 +199,17 @@ const (
 
 // Chat traduce la petición y la envía al proveedor por el protocolo adecuado.
 func (c *Connector) Chat(ctx context.Context, req *anthropic.MessagesRequest, targetModel string, w http.ResponseWriter, r *http.Request) error {
-	headers := map[string]string{}
-	// Go exige un ID de sesión estable para enrutar y cachear prompts.
-	// Claude Code envía el suyo en X-Claude-Code-Session-Id (Go lo reconoce).
-	if sid := sessionID(r); sid != "" {
-		headers["x-opencode-session"] = sid
+	// Huella del CLI de OpenCode, tal y como la envía
+	// packages/opencode/src/session/llm.ts para los proveedores "opencode":
+	// el User-Agent opencode/<versión> más las cuatro cabeceras
+	// x-opencode-*. Sin ellas la API responde 403 FreeTierError
+	// ("OpenCode's free tier can only be used from within OpenCode").
+	headers := map[string]string{
+		"User-Agent":         c.userAgent,
+		"x-opencode-project": c.projectID,
+		"x-opencode-session": sessionID(r),
+		"x-opencode-request": newMessageID(),
+		"x-opencode-client":  opencodeClient,
 	}
 	if native := r.Header.Get("X-Claude-Code-Session-Id"); native != "" {
 		headers["X-Claude-Code-Session-Id"] = native
@@ -189,25 +252,177 @@ func preferredProtocol(model string) protocol {
 	}
 }
 
-// sessionID obtiene la sesión del cliente o genera una estable por petición.
+// --- IDs en formato OpenCode ------------------------------------------------
+//
+// La API de Zen/Go solo acepta IDs con el formato nativo de OpenCode
+// (packages/opencode/src/id/id.ts):
+//
+//	<prefijo>_ + 12 hex + 14 base62
+//
+// Los 12 hex son 6 bytes big-endian con los 48 bits bajos de
+// ms*4096 + counter. Los IDs de sesión ("ses_", Identifier.descending)
+// llevan los bits invertidos (~) para ordenar descendente; los de mensaje
+// ("msg_", Identifier.ascending) van tal cual. Cualquier otro formato (el
+// UUID de Claude Code, X-Session-Id, o la ausencia total) se rechaza con
+// 403, así que se convierten o se generan con este formato.
+const (
+	idPrefixSession = "ses_"
+	idPrefixMessage = "msg_"
+	idHexLen        = 12
+	idRandLen       = 14
+	idBase62        = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	idTotalLen      = len(idPrefixSession) + idHexLen + idRandLen // "ses_" + 12 + 14 = 30
+	maxDerived      = 4096                                         // tope del mapa de sesiones derivadas
+)
+
+// idState replica el contador monótono de Identifier.create: dos IDs
+// generados en el mismo milisegundo se diferencian por el counter.
+var (
+	idMu     sync.Mutex
+	idLastMs int64
+	idCount  uint32
+)
+
+// derivedMu protege derivedIDs, el mapeo estable cliente → OpenCode para que
+// una misma sesión del cliente siempre resuene en la misma sesión del
+// proveedor (enrutado y prompt cache).
+var (
+	derivedMu  sync.Mutex
+	derivedIDs = map[string]string{}
+)
+
+// sessionID obtiene la sesión del cliente en formato OpenCode: si el cliente
+// ya envía un ID con el formato nativo se reenvía tal cual; cualquier otro
+// valor (p. ej. el UUID X-Claude-Code-Session-Id de Claude Code) se mapea de
+// forma estable al formato de OpenCode; si no llega ninguna cabecera, se
+// genera una nueva.
 func sessionID(r *http.Request) string {
 	for _, h := range []string{"x-opencode-session", "X-Claude-Code-Session-Id", "X-Session-Id"} {
 		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
-			return v
+			if isIdentifier(v, idPrefixSession) {
+				return v
+			}
+			return deriveSessionID(v)
 		}
 	}
-	return newSessionID()
+	return newIdentifier(idPrefixSession, true)
 }
 
-// newSessionID genera un ID aleatorio tipo UUID.
-func newSessionID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("sess-%d", time.Now().UnixNano())
+// newMessageID genera el ID del mensaje de usuario que OpenCode envía en
+// x-opencode-request (input.user.id: prefijo msg, ascendente).
+func newMessageID() string {
+	return newIdentifier(idPrefixMessage, false)
+}
+
+// newIdentifier genera un ID nuevo con el formato de OpenCode. Las sesiones
+// (descending) llevan el componente temporal invertido, como en el CLI.
+func newIdentifier(prefix string, descending bool) string {
+	now := time.Now().UnixMilli()
+	idMu.Lock()
+	if now == idLastMs {
+		idCount++
+	} else {
+		idLastMs = now
+		idCount = 0
 	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	counter := idCount
+	idMu.Unlock()
+	return prefix + idTimeHex(now, counter, descending) + randomBase62(idRandLen)
+}
+
+// deriveSessionID mapea un ID de sesión ajeno (p. ej. el UUID de Claude
+// Code) a un ID de sesión de OpenCode de forma determinista: la misma
+// entrada produce siempre el mismo ID. El hash decide la parte aleatoria; el
+// sello de tiempo real mantiene el componente temporal plausible que espera
+// la API.
+func deriveSessionID(clientID string) string {
+	derivedMu.Lock()
+	defer derivedMu.Unlock()
+	if id, ok := derivedIDs[clientID]; ok {
+		return id
+	}
+	sum := sha256.Sum256([]byte(clientID))
+	id := idPrefixSession + idTimeHex(time.Now().UnixMilli(), 0, true) + base62FromBytes(sum[:idRandLen])
+	if len(derivedIDs) >= maxDerived {
+		derivedIDs = map[string]string{} // reinicio simple: evita crecer sin límite
+	}
+	derivedIDs[clientID] = id
+	return id
+}
+
+// isIdentifier comprueba el formato "<prefijo>_" + 12 hex + 14 base62.
+func isIdentifier(id, prefix string) bool {
+	if len(id) != len(prefix)+idHexLen+idRandLen || !strings.HasPrefix(id, prefix) {
+		return false
+	}
+	for i := len(prefix); i < len(prefix)+idHexLen; i++ {
+		if !isHexChar(id[i]) {
+			return false
+		}
+	}
+	for i := len(prefix) + idHexLen; i < len(id); i++ {
+		if !isBase62Char(id[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isSessionID comprueba el formato de los IDs de sesión de OpenCode.
+func isSessionID(id string) bool { return isIdentifier(id, idPrefixSession) }
+
+func isHexChar(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+}
+
+func isBase62Char(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+// idTimeHex codifica el componente temporal de un ID: current = ms*4096 +
+// counter, restringido a sus 48 bits bajos y emitido como 6 bytes big-endian
+// en hexadecimal. Con descending se invierten los bits (~current), que es
+// como OpenCode genera los IDs de sesión.
+func idTimeHex(ms int64, counter uint32, descending bool) string {
+	if ms <= 0 {
+		ms = time.Now().UnixMilli()
+	}
+	value := (uint64(ms)<<12 + uint64(counter)) & 0xFFFFFFFFFFFF
+	if descending {
+		value = ^value & 0xFFFFFFFFFFFF
+	}
+	const digits = "0123456789abcdef"
+	var out [idHexLen]byte
+	for i := 0; i < 6; i++ {
+		b := byte(value >> (40 - 8*i))
+		out[2*i] = digits[b>>4]
+		out[2*i+1] = digits[b&0x0f]
+	}
+	return string(out[:])
+}
+
+// randomBase62 devuelve n caracteres del alfabeto base62 de OpenCode.
+func randomBase62(n int) string {
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		// crypto/rand no debería fallar; última salida: ruido del reloj.
+		seed := uint64(time.Now().UnixNano())
+		for i := range raw {
+			seed = seed*6364136223846793005 + 1442695040888963407
+			raw[i] = byte(seed >> 33)
+		}
+	}
+	return base62FromBytes(raw)
+}
+
+// base62FromBytes convierte bytes en caracteres base62 (byte % 62, igual que
+// el generador de OpenCode).
+func base62FromBytes(raw []byte) string {
+	out := make([]byte, len(raw))
+	for i, b := range raw {
+		out[i] = idBase62[int(b)%len(idBase62)]
+	}
+	return string(out)
 }
 
 // chatMessages reenvía la petición Anthropic tal cual al endpoint /messages

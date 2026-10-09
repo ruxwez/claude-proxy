@@ -62,13 +62,13 @@ func buildRegistry(cfg config.Settings, log *slog.Logger) *connector.Registry {
 		if cfg.OpenCodeAPIKey == "" {
 			log.Warn("OPENCODE_ZEN_ENABLED=true pero OPENCODE_API_KEY está vacía")
 		}
-		reg.Add(opencode.NewZen(cfg.OpenCodeAPIKey, cfg.Timeout))
+		reg.Add(opencode.NewZen(cfg.OpenCodeAPIKey, cfg.OpenCodeClientVersion, cfg.OpenCodeProjectID, cfg.Timeout))
 	}
 	if cfg.GoEnabled {
 		if cfg.OpenCodeAPIKey == "" {
 			log.Warn("OPENCODE_GO_ENABLED=true pero OPENCODE_API_KEY está vacía")
 		}
-		reg.Add(opencode.NewGo(cfg.OpenCodeAPIKey, cfg.Timeout))
+		reg.Add(opencode.NewGo(cfg.OpenCodeAPIKey, cfg.OpenCodeClientVersion, cfg.OpenCodeProjectID, cfg.Timeout))
 	}
 	if cfg.OpenAI.Enabled {
 		if cfg.OpenAI.APIKey == "" {

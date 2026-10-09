@@ -18,6 +18,12 @@ const (
 	OpenAIBaseURL = "https://api.openai.com/v1"
 )
 
+// DefaultClientVersion es la versión del CLI de OpenCode anunciada por
+// defecto (User-Agent "opencode/<versión>", línea 2.x). La API de Zen/Go
+// solo sirve el tier gratuito a peticiones con User-Agent opencode/<versión>
+// (versión >= 1.17.0).
+const DefaultClientVersion = "2.0.26"
+
 // Settings es la configuración completa del servidor.
 type Settings struct {
 	Host      string        // PROXY_HOST (def. 0.0.0.0)
@@ -29,6 +35,14 @@ type Settings struct {
 	OpenCodeAPIKey string // OPENCODE_API_KEY
 	ZenEnabled     bool   // OPENCODE_ZEN_ENABLED
 	GoEnabled      bool   // OPENCODE_GO_ENABLED
+
+	// OpenCodeClientVersion es la versión de cliente anunciada a la API de
+	// OpenCode (User-Agent "opencode/<versión>"); la exige para aceptar las
+	// peticiones como provenientes del CLI de OpenCode.
+	OpenCodeClientVersion string // OPENCODE_CLIENT_VERSION (def. 2.0.26)
+	// OpenCodeProjectID es el valor de x-opencode-project (vacío = uno
+	// generado y estable por proceso).
+	OpenCodeProjectID string // OPENCODE_PROJECT_ID
 
 	// Conector OpenAI genérico.
 	OpenAI OpenAI
@@ -50,9 +64,11 @@ func Load() Settings {
 		AuthToken: env.Get("PROXY_AUTH_TOKEN", ""),
 		Timeout:   time.Duration(env.Int("REQUEST_TIMEOUT_SECONDS", 120)) * time.Second,
 
-		OpenCodeAPIKey: env.Get("OPENCODE_API_KEY", ""),
-		ZenEnabled:     env.Bool("OPENCODE_ZEN_ENABLED", false),
-		GoEnabled:      env.Bool("OPENCODE_GO_ENABLED", false),
+		OpenCodeAPIKey:        env.Get("OPENCODE_API_KEY", ""),
+		ZenEnabled:            env.Bool("OPENCODE_ZEN_ENABLED", false),
+		GoEnabled:             env.Bool("OPENCODE_GO_ENABLED", false),
+		OpenCodeClientVersion: env.Get("OPENCODE_CLIENT_VERSION", DefaultClientVersion),
+		OpenCodeProjectID:     env.Get("OPENCODE_PROJECT_ID", ""),
 
 		OpenAI: OpenAI{
 			Enabled: env.Bool("OPENAI_ENABLED", false),
