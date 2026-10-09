@@ -4,17 +4,17 @@ package openai
 
 // ChatRequest es POST {base_url}/chat/completions.
 type ChatRequest struct {
-	Model            string        `json:"model"`
-	Messages         []ChatMessage `json:"messages"`
-	MaxTokens        *int          `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int       `json:"max_completion_tokens,omitempty"`
-	Temperature      *float64      `json:"temperature,omitempty"`
-	TopP             *float64      `json:"top_p,omitempty"`
-	Stop             []string      `json:"stop,omitempty"`
-	Stream           bool          `json:"stream,omitempty"`
-	StreamOptions    *StreamOptions `json:"stream_options,omitempty"`
-	Tools            []Tool        `json:"tools,omitempty"`
-	ToolChoice       any           `json:"tool_choice,omitempty"`
+	Model               string         `json:"model"`
+	Messages            []ChatMessage  `json:"messages"`
+	MaxTokens           *int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int           `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64       `json:"temperature,omitempty"`
+	TopP                *float64       `json:"top_p,omitempty"`
+	Stop                []string       `json:"stop,omitempty"`
+	Stream              bool           `json:"stream,omitempty"`
+	StreamOptions       *StreamOptions `json:"stream_options,omitempty"`
+	Tools               []Tool         `json:"tools,omitempty"`
+	ToolChoice          any            `json:"tool_choice,omitempty"`
 }
 
 type StreamOptions struct {
@@ -89,9 +89,9 @@ type Chunk struct {
 }
 
 type ChunkChoice struct {
-	Index        int         `json:"index"`
-	Delta        Delta       `json:"delta"`
-	FinishReason *string     `json:"finish_reason,omitempty"`
+	Index        int     `json:"index"`
+	Delta        Delta   `json:"delta"`
+	FinishReason *string `json:"finish_reason,omitempty"`
 }
 
 type Delta struct {
@@ -101,10 +101,10 @@ type Delta struct {
 }
 
 type ToolCallDelta struct {
-	Index    *int             `json:"index,omitempty"`
-	ID       *string          `json:"id,omitempty"`
-	Type     *string          `json:"type,omitempty"`
-	Function *FunctionDelta   `json:"function,omitempty"`
+	Index    *int           `json:"index,omitempty"`
+	ID       *string        `json:"id,omitempty"`
+	Type     *string        `json:"type,omitempty"`
+	Function *FunctionDelta `json:"function,omitempty"`
 }
 
 type FunctionDelta struct {

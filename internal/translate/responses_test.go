@@ -103,7 +103,7 @@ func TestResponsesToAnthropic_TextAndTools(t *testing.T) {
 
 func TestResponsesToAnthropic_MaxTokens(t *testing.T) {
 	resp := &responses.Response{
-		Status: "incomplete",
+		Status:            "incomplete",
 		IncompleteDetails: &responses.IncompleteDetails{Reason: "max_output_tokens"},
 		Output: []responses.OutputItem{{
 			Type: "message", Role: "assistant",

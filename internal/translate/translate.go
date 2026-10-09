@@ -111,6 +111,15 @@ func convertToolChoice(tc *anthropic.ToolChoice) any {
 // más un mensaje tool por cada tool_result (OpenAI lo exige separado).
 func convertMessage(m anthropic.Message) ([]openai.ChatMessage, error) {
 	switch m.Role {
+	case "system":
+		// Mensajes de sistema a mitad de conversación (Claude Code los usa).
+		var text strings.Builder
+		for _, b := range m.Content {
+			if b.Type == "text" {
+				text.WriteString(b.Text)
+			}
+		}
+		return []openai.ChatMessage{{Role: "system", Content: text.String()}}, nil
 	case "user":
 		var textParts []openai.Part
 		var out []openai.ChatMessage

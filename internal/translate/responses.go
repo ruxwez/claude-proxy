@@ -77,6 +77,20 @@ func AnthropicToResponses(req *anthropic.MessagesRequest, targetModel string) (*
 // items de input de Responses API.
 func convertMessageToResponsesInput(m anthropic.Message) ([]any, error) {
 	switch m.Role {
+	case "system":
+		// Mensajes de sistema a mitad de conversación (Claude Code los usa).
+		var text strings.Builder
+		for _, b := range m.Content {
+			if b.Type == "text" {
+				text.WriteString(b.Text)
+			}
+		}
+		return []any{map[string]any{
+			"role": "system",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": text.String()},
+			},
+		}}, nil
 	case "user":
 		var parts []any
 		var out []any

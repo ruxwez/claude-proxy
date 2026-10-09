@@ -18,7 +18,7 @@ type MessagesRequest struct {
 	TopK          *int           `json:"top_k,omitempty"`
 	StopSequences []string       `json:"stop_sequences,omitempty"`
 	Stream        bool           `json:"stream,omitempty"`
-	Tools         []Tool        `json:"tools,omitempty"`
+	Tools         []Tool         `json:"tools,omitempty"`
 	ToolChoice    *ToolChoice    `json:"tool_choice,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
 }
@@ -332,14 +332,14 @@ type ToolChoice struct {
 
 // MessagesResponse es la respuesta no-stream de /v1/messages.
 type MessagesResponse struct {
-	ID           string   `json:"id"`
-	Type         string   `json:"type"`
-	Role         string   `json:"role"`
-	Content      []any    `json:"content"`
-	Model        string   `json:"model"`
-	StopReason   *string  `json:"stop_reason"`
-	StopSequence *string  `json:"stop_sequence,omitempty"`
-	Usage        Usage    `json:"usage"`
+	ID           string  `json:"id"`
+	Type         string  `json:"type"`
+	Role         string  `json:"role"`
+	Content      []any   `json:"content"`
+	Model        string  `json:"model"`
+	StopReason   *string `json:"stop_reason"`
+	StopSequence *string `json:"stop_sequence,omitempty"`
+	Usage        Usage   `json:"usage"`
 }
 
 type Usage struct {
@@ -352,7 +352,7 @@ type CountTokensRequest struct {
 	Model    string    `json:"model"`
 	System   System    `json:"system,omitempty"`
 	Messages []Message `json:"messages"`
-	Tools    []Tool   `json:"tools,omitempty"`
+	Tools    []Tool    `json:"tools,omitempty"`
 }
 
 type CountTokensResponse struct {
@@ -361,7 +361,7 @@ type CountTokensResponse struct {
 
 // ErrorResponse es el formato de error Anthropic.
 type ErrorResponse struct {
-	Type  string `json:"type"`
+	Type  string  `json:"type"`
 	Error EDetail `json:"error"`
 }
 
@@ -375,14 +375,18 @@ func NewError(typ, msg string) ErrorResponse {
 	return ErrorResponse{Type: "error", Error: EDetail{Type: typ, Message: msg}}
 }
 
-// ModelsResponse para GET /v1/models (lista Claude Like).
+// ModelsResponse es GET /v1/models en el formato de Anthropic.
 type ModelsResponse struct {
-	Data []ModelInfo `json:"data"`
+	Data    []ModelInfo `json:"data"`
+	HasMore bool        `json:"has_more"`
+	FirstID *string     `json:"first_id"`
+	LastID  *string     `json:"last_id"`
 }
 
+// ModelInfo es un modelo en el formato de Anthropic.
 type ModelInfo struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	Type        string `json:"type"` // "model"
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   string `json:"created_at"` // RFC3339
 }

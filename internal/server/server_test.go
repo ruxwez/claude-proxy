@@ -1,171 +1,168 @@
 package server
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/ruxwez/claude-proxy/internal/anthropic"
 	"github.com/ruxwez/claude-proxy/internal/config"
+	"github.com/ruxwez/claude-proxy/internal/connector"
 )
 
-// mockOpenAI simula /chat/completions (no-stream y stream).
-func mockOpenAI(t *testing.T) *httptest.Server {
+// fakeConnector implementa connector.Connector para tests.
+type fakeConnector struct {
+	chatModel string
+}
+
+func (fakeConnector) Name() string { return "fake" }
+
+func (fakeConnector) Models(context.Context) ([]connector.Model, error) {
+	return []connector.Model{
+		{ID: "beta", DisplayName: "Beta"},
+		{ID: "alpha-free", DisplayName: "Alpha"},
+	}, nil
+}
+
+func (f *fakeConnector) Chat(_ context.Context, req *anthropic.MessagesRequest, targetModel string, w http.ResponseWriter, _ *http.Request) error {
+	f.chatModel = targetModel
+	return connector.WriteJSON(w, http.StatusOK, &anthropic.MessagesResponse{
+		ID:    "msg_test",
+		Type:  "message",
+		Role:  "assistant",
+		Model: req.Model,
+		Content: []any{
+			map[string]any{"type": "text", "text": "target=" + targetModel},
+		},
+	})
+}
+
+func newTestServer(t *testing.T, authToken string) *Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if auth := r.Header.Get("authorization"); auth != "Bearer sk-mock" {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":{"message":"bad key","type":"auth"}}`))
-			return
+	reg := connector.NewRegistry()
+	reg.Add(&fakeConnector{})
+	cfg := config.Settings{Host: "127.0.0.1", Port: 0, AuthToken: authToken}
+	return New(cfg, reg, nil)
+}
+
+func TestModelsArePrefixed(t *testing.T) {
+	srv := newTestServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp anthropic.ModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("modelos = %d, want 2", len(resp.Data))
+	}
+	// Orden alfabético por ID completo.
+	if resp.Data[0].ID != "fake/alpha-free" || resp.Data[1].ID != "fake/beta" {
+		t.Fatalf("IDs inesperados: %s, %s", resp.Data[0].ID, resp.Data[1].ID)
+	}
+	if resp.Data[0].Type != "model" || resp.Data[0].DisplayName == "" {
+		t.Fatalf("campos incompletos: %+v", resp.Data[0])
+	}
+	if resp.HasMore {
+		t.Fatalf("has_more = true, want false")
+	}
+}
+
+func TestMessagesRoutesByPrefix(t *testing.T) {
+	srv := newTestServer(t, "")
+	body := `{"model":"fake/beta","max_tokens":16,"messages":[{"role":"user","content":"hola"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var resp anthropic.MessagesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if resp.Model != "fake/beta" {
+		t.Fatalf("model = %q, want fake/beta", resp.Model)
+	}
+	if len(resp.Content) == 0 {
+		t.Fatalf("respuesta sin contenido")
+	}
+}
+
+func TestMessagesRequiresPrefix(t *testing.T) {
+	srv := newTestServer(t, "")
+	body := `{"model":"beta","max_tokens":16,"messages":[{"role":"user","content":"hola"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestMessagesUnknownConnector(t *testing.T) {
+	srv := newTestServer(t, "")
+	body := `{"model":"nope/beta","max_tokens":16,"messages":[{"role":"user","content":"hola"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestAuthToken(t *testing.T) {
+	srv := newTestServer(t, "secreto")
+
+	// Sin token -> 401.
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("sin token status = %d, want 401", rec.Code)
+	}
+
+	// Con x-api-key -> 200.
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("x-api-key", "secreto")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("con token status = %d, want 200", rec.Code)
+	}
+}
+
+func TestSplitModel(t *testing.T) {
+	cases := []struct {
+		in   string
+		name string
+		raw  string
+		ok   bool
+	}{
+		{"opencode-zen/exo-free", "opencode-zen", "exo-free", true},
+		{"openai/gpt-4o", "openai", "gpt-4o", true},
+		{"beta", "", "", false},
+		{"fake/", "", "", false},
+		{"/beta", "", "", false},
+	}
+	for _, c := range cases {
+		name, raw, ok := splitModel(c.in)
+		if ok != c.ok || name != c.name || raw != c.raw {
+			t.Errorf("splitModel(%q) = (%q,%q,%v), want (%q,%q,%v)", c.in, name, raw, ok, c.name, c.raw, c.ok)
 		}
-		if req["model"] != "gpt-4o-mini" {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":{"message":"bad model","type":"invalid"}}`))
-			return
-		}
-		stream, _ := req["stream"].(bool)
-		if stream {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprintln(w, `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Hola"},"finish_reason":null}]}`)
-			fmt.Fprintln(w, `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":" mock"},"finish_reason":null}]}`)
-			fmt.Fprintln(w, `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":4,"total_tokens":11}}`)
-			fmt.Fprintln(w, `data: [DONE]`)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"id": "chatcmpl-1", "object": "chat.completion", "created": 1, "model": "gpt-4o-mini",
-			"choices": [{"index": 0, "message": {"role": "assistant", "content": "Hola mock"}, "finish_reason": "stop"}],
-			"usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11}
-		}`))
-	}))
-}
-
-func testServer(t *testing.T, mockURL string) *Server {
-	t.Helper()
-	cfg := &config.Config{
-		Server: config.ServerConfig{Port: 0},
-		Routes: []config.Route{{
-			AnthropicModel: "claude-3-5-sonnet-20241022",
-			Provider:       "openai",
-			TargetModel:    "gpt-4o-mini",
-			BaseURL:        mockURL,
-			APIKey:         "sk-mock",
-			TimeoutSeconds: 10,
-		}},
-	}
-	return New(cfg, nil)
-}
-
-func TestE2E_NonStream(t *testing.T) {
-	mock := mockOpenAI(t)
-	defer mock.Close()
-	srv := httptest.NewServer(testServer(t, mock.URL))
-	defer srv.Close()
-
-	body := `{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"Hola"}]}`
-	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
-	var out map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	if out["type"] != "message" || out["model"] != "claude-3-5-sonnet-20241022" {
-		t.Fatalf("respuesta no Anthropic: %v", out)
-	}
-	content, _ := json.Marshal(out["content"])
-	if !bytes.Contains(content, []byte("Hola mock")) {
-		t.Fatalf("content sin texto del mock: %s", content)
-	}
-}
-
-func TestE2E_Stream(t *testing.T) {
-	mock := mockOpenAI(t)
-	defer mock.Close()
-	srv := httptest.NewServer(testServer(t, mock.URL))
-	defer srv.Close()
-
-	body := `{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"Hola"}]}`
-	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
-		t.Fatalf("content-type = %q", ct)
-	}
-	buf := new(bytes.Buffer)
-	_, _ = buf.ReadFrom(resp.Body)
-	s := buf.String()
-	for _, want := range []string{"message_start", "content_block_delta", "message_stop", "Hola"} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("stream sin %q:\n%s", want, s)
-		}
-	}
-}
-
-func TestE2E_ModelNotConfigured(t *testing.T) {
-	mock := mockOpenAI(t)
-	defer mock.Close()
-	srv := httptest.NewServer(testServer(t, mock.URL))
-	defer srv.Close()
-
-	body := `{"model":"no-existe","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
-	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestE2E_HealthModelsCountTokens(t *testing.T) {
-	mock := mockOpenAI(t)
-	defer mock.Close()
-	s := testServer(t, mock.URL)
-	ts := httptest.NewServer(s)
-	defer ts.Close()
-
-	if r, _ := http.Get(ts.URL + "/health"); r.StatusCode != 200 {
-		t.Fatalf("health = %d", r.StatusCode)
-		r.Body.Close()
-	} else {
-		r.Body.Close()
-	}
-	r, err := http.Get(ts.URL + "/v1/models")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var models map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&models)
-	r.Body.Close()
-	if !strings.Contains(fmt.Sprint(models), "claude-3-5-sonnet-20241022") {
-		t.Fatalf("models sin el modelo configurado: %v", models)
-	}
-
-	ctBody := `{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hola mundo"}]}`
-	r2, err := http.Post(ts.URL+"/v1/messages/count_tokens", "application/json", strings.NewReader(ctBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ct map[string]any
-	_ = json.NewDecoder(r2.Body).Decode(&ct)
-	r2.Body.Close()
-	if _, ok := ct["input_tokens"]; !ok {
-		t.Fatalf("count_tokens sin input_tokens: %v", ct)
 	}
 }

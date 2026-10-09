@@ -1,170 +1,150 @@
-# claude-proxy — API Claude Like en Go
+# claude-proxy — API estilo Claude con conectores
 
-Recibe peticiones bajo el estándar **Anthropic Messages API** (`POST /v1/messages`)
-y las redirige al proveedor real según el **modelo** indicado, usando un fichero `.toml`.
+Servidor en Go que expone la **API de Anthropic Messages** (`POST /v1/messages`)
+y **traduce cada petición al estándar del conector** indicado en el modelo.
 
-Proveedor de referencia implementado: **OpenAI** (`/chat/completions`).
-Modelos gratuitos de **OpenCode Zen**: `provider = "opencode"` (`/chat/completions`)
-y `provider = "opencode-responses"` (`/responses`).
-La arquitectura es por **adaptadores**: añadir Gemini, Ollama, Mistral, etc.
-es implementar la interfaz `adapter.Adapter`.
+En lugar de un fichero de rutas (TOML), los proveedores son **conectores**
+que se activan con **variables booleanas del `.env`**. El modelo pedido lleva
+el prefijo del conector: `conector/modelo`.
 
-## Endpoints expuestos (compat Anthropic)
+Conectores incluidos:
 
-| Método | Ruta                          | Descripción                                    |
-|--------|-------------------------------|------------------------------------------------|
-| POST   | `/v1/messages`                | Crear mensaje (stream y no-stream)             |
-| POST   | `/v1/messages/count_tokens`   | Estimación local de tokens                    |
-| GET    | `/v1/models`                  | Lista los `anthropic_model` configurados       |
-| GET    | `/health`                     | `{"status":"ok"}`                              |
+| Conector         | Base URL                          | Qué expone |
+|------------------|-----------------------------------|------------|
+| `opencode-zen`   | `https://opencode.ai/zen/v1`      | Solo modelos gratuitos (IDs con `free`) |
+| `opencode-go`    | `https://opencode.ai/zen/go/v1`   | Todo el catálogo Go |
+| `openai`         | configurable (`OPENAI_BASE_URL`)  | Modelos de cualquier API compatible OpenAI |
 
-Headers de entrada aceptados: `x-api-key`, `anthropic-version`, `content-type`.
-La `api-key` del cliente **no** se reenvía: se usa la del proveedor según la ruta.
+Zen y Go comparten la misma API key (`OPENCODE_API_KEY`).
 
-## Configuración `.toml`
+> **Aviso sobre el tier gratuito de Zen**: OpenCode bloquea el tier gratuito
+> fuera de la app OpenCode. Con la key real, los modelos `*-free` de Zen
+> devuelven `403 "OpenCode's free tier can only be used from within OpenCode"`.
+> El conector los lista, pero no sirven chat desde el proxy. Usa el conector
+> Go (suscripción) para modelos que sí funcionan.
 
-```toml
-[server]
-host = "0.0.0.0"
-port = 8080
-# auth_token = "sk-proxy-secreto"  # si se define, el cliente debe enviarlo
-                                  # vía x-api-key o Authorization: Bearer
+### Protocolos por modelo
 
-# Ruta por defecto cuando ningún [[routes]] coincide.
-[default]
-provider = "openai"
-target_model = "gpt-4o-mini"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-timeout_seconds = 120
+Cada modelo se enruta al estándar que soporta (ver
+[endpoints de Go](https://opencode.ai/docs/go/#endpoints)):
 
-[[routes]]
-anthropic_model = "claude-3-5-sonnet-20241022"
-provider = "openai"
-target_model = "gpt-4o-mini"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-timeout_seconds = 120
+- `/messages` **nativo Anthropic**: `claude-haiku-5-5`, `minimax-m*`,
+  `qwen3.7-plus`, `qwen3.8-max`, `qwen3.8-flash`. Se reenvían tal cual
+  (sin traducción), lo que conserva `tool_use`, `cache_control`, etc.
+- `/responses`: `grok-4.6`, `grok-4.7`, `gpt-6-luna`, `gpt-5.6-luna`,
+  `muse-spark-*`. Se traducen desde/hacia Anthropic.
+- `/chat/completions`: el resto (GLM, Kimi, DeepSeek, LongCat, MiMo, …).
 
-# Comodines estilo path.Match (solo `*`): el primero que coincida gana.
-[[routes]]
-anthropic_model = "claude-3-opus-*"
-provider = "openai"
-target_model = "gpt-4o"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+## Endpoints
 
-# Passthrough a Anthropic real (sin traducción).
-[[routes]]
-anthropic_model = "claude-3-haiku-*"
-provider = "anthropic"
-target_model = "claude-3-haiku-20240307"
-base_url = "https://api.anthropic.com/v1"
-api_key_env = "ANTHROPIC_API_KEY"
+| Método | Ruta                          | Descripción |
+|--------|-------------------------------|-------------|
+| POST   | `/v1/messages`                | Crear mensaje (stream y no-stream), estilo Anthropic |
+| POST   | `/v1/messages/count_tokens`   | Estimación local de tokens (chars/4) |
+| GET    | `/v1/models`                  | Agrega los modelos de todos los conectores activos |
+| GET    | `/v1/models/{conector}/{modelo}` | Un modelo concreto |
+| GET    | `/health`                     | Estado y conectores activos |
+
+Cabeceras de entrada aceptadas: `x-api-key`, `anthropic-version`,
+`content-type`. La `x-api-key` del cliente **no** se reenvía: se usa la key
+del proveedor configurada en el `.env`.
+
+### Formato de `/v1/models` (estilo Anthropic)
+
+```json
+{
+  "data": [
+    {
+      "type": "model",
+      "id": "opencode-zen/exo-free",
+      "display_name": "exo-free",
+      "created_at": "2026-10-09T21:13:50Z"
+    }
+  ],
+  "has_more": false,
+  "first_id": "opencode-zen/exo-free",
+  "last_id": "opencode-zen/step-5-preview-free"
+}
 ```
 
-Notas:
+Por defecto devuelve **todos** los modelos. Con `?limit=N` se recortan la
+respuesta y `has_more` se pone a `true`.
 
-- `anthropic_model`: nombre que el cliente envía en `"model"`. Acepta `*`.
-- `provider`: `openai` | `anthropic` | `opencode` | `opencode-responses` (extensible).
-- `target_model`: modelo real del proveedor. `"*"` = reenviar el modelo
-  solicitado tal cual (útil para flotas como los `*-free` de Zen).
-- API key (orden): `api_key` (expande `$ENV` / `${ENV}`) → `api_key_env` → `""`
-  (vacío permitido para proveedores locales tipo Ollama).
-- `base_url` por defecto: OpenAI `https://api.openai.com/v1`,
-  Anthropic `https://api.anthropic.com/v1`,
-  opencode/opencode-responses `https://opencode.ai/zen/v1` (se recorta `/` final).
-- `timeout_seconds` por defecto: `120`.
+## Modelo con prefijo
 
-## Modelos gratuitos de OpenCode Zen
+El campo `"model"` de `POST /v1/messages` se identifica como
+`conector/modelo`, p. ej.:
 
-Verificado contra `GET https://opencode.ai/zen/v1/models` el 09/10/2026.
-Son gratis por tiempo limitado ([precios Zen](https://opencode.ai/docs/zen/#pricing)).
-Config lista para usar: **`config.opencode.toml`**.
+- `opencode-zen/exo-free` → Zen (modelo gratuito).
+- `opencode-go/minimax-m3` → Go (catálogo completo).
+- `openai/gpt-4o-mini` → conector OpenAI genérico.
+
+Los modelos gratuitos incluyen `free` en su propio ID (así lo sirve Zen),
+por lo que siempre es visible si un modelo es gratuito.
+
+## Configuración `.env`
 
 ```powershell
-# 1. Pon tu key de https://opencode.ai/auth (Zen) en el .env:
-Copy-Item .env.example .env   # y rellena OPENCODE_API_KEY
-# 2. Arranca con la config de gratuitos:
-go run ./cmd/server --config config.opencode.toml
-# 3. Pide con el ID de Zen como "model":
-curl http://localhost:8080/v1/messages `
-  -H "content-type: application/json" `
-  -d '{"model":"exo-free","max_tokens":256,
-       "messages":[{"role":"user","content":"Hola, ¿quién eres?"}]}'
+Copy-Item .env.example .env   # y rellena las keys
 ```
 
-| ID Zen (= `"model"`) | provider en el toml | Endpoint Zen | Notas |
-|---|---|---|---|
-| `big-pickle` | `opencode` | `/chat/completions` | stealth, gratis temporal |
-| `space-bunny-free` | `opencode` | `/chat/completions` | zero-retention |
-| `longcat-2.5-preview-free` | `opencode` | `/chat/completions` | zero-retention |
-| `step-5-preview-free` | `opencode` | `/chat/completions` | zero-retention |
-| `exo-free` | `opencode` | `/chat/completions` | gratis temporal |
-| `mimo-v2.6-flash-free` | `opencode` | `/chat/completions` | gratis temporal |
-| `mimo-v2.5-free` | `opencode` | `/chat/completions` | en docs; ausente del `/models` en vivo el 09/10/2026 |
-| `ling-3.1-flash-free` | `opencode` | `/chat/completions` | gratis temporal |
-| `ling-3.0-flash-fin-free` | `opencode` | `/chat/completions` | gratis temporal |
-| `nemotron-3-ultra-free` | `opencode` | `/chat/completions` | trial NVIDIA, no enviar datos sensibles |
-| `nemotron-3.5-lightning-free` | `opencode` | `/chat/completions` | trial NVIDIA, no enviar datos sensibles |
-| `muse-spark-1.3-contributor-free` | `opencode-responses` | `/responses` | Zen solo lo sirve en Responses API; entrena con tus prompts |
-| `muse-spark-1.2-contributor-free` | `opencode-responses` | `/responses` | solo en `/models` en vivo, no en docs |
+| Variable | Defecto | Descripción |
+|---|---|---|
+| `PROXY_HOST` | `0.0.0.0` | Interfaz de escucha |
+| `PROXY_PORT` | `8080` | Puerto |
+| `PROXY_AUTH_TOKEN` | (vacío) | Si se define, el cliente debe enviarlo por `x-api-key` o `Authorization: Bearer` |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Timeout por llamada al proveedor |
+| `OPENCODE_API_KEY` | (vacío) | API key de OpenCode (Zen y Go) — https://opencode.ai/auth |
+| `OPENCODE_ZEN_ENABLED` | `false` | Activa el conector Zen (solo `free`) |
+| `OPENCODE_GO_ENABLED` | `false` | Activa el conector Go (todo) |
+| `OPENAI_ENABLED` | `false` | Activa el conector OpenAI genérico |
+| `OPENAI_API_KEY` | (vacío) | Key del proveedor OpenAI |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base de la API compatible OpenAI |
+| `OPENAI_MODELS` | (vacío) | CSV opcional; si se define no se consulta `/models` |
 
-Notas:
-
-- `config.opencode.toml` incluye además la ruta comodín `*-free` con
-  `target_model = "*"`: futuros modelos gratis funcionan sin editar el fichero.
-- Limitaciones de `opencode-responses`: sin `stop_sequences`/`top_k`
-  (Responses API no los contempla; se ignoran).
-- No incluido: `jev-1.13-free` (endpoint `/systemone`, no es un chat y no
-  admite el estándar Anthropic Messages).
-- Privacidad: durante el periodo gratuito varios proveedores pueden usar los
-  datos para mejorar el modelo (ver [privacidad Zen](https://opencode.ai/docs/zen/#privacy)).
-- OpenCode Go (suscripción) usa otra base: `https://opencode.ai/zen/go/v1`
-  (ver bloque comentado al final de `config.opencode.toml`).
+Los booleanos aceptan `true/false`, `1/0`, `yes/no`, `on/off`, `si/no`.
 
 ## Ejecutar
 
-Requisitos: Go 1.23+ (comprueba con `go version`).
+Requisitos: Go 1.23+.
 
 ```powershell
-# 1. Clona/entrar al proyecto y crea tu .env con las keys:
+# 1. Configura el .env
 Copy-Item .env.example .env
-notepad .env   # rellena OPENCODE_API_KEY (https://opencode.ai/auth) y/o OPENAI_API_KEY
+notepad .env            # rellena OPENCODE_API_KEY y activa conectores
 
-# 2. Elige config: gratuita (Zen) o ejemplo (OpenAI):
-go run ./cmd/server --config config.opencode.toml      # modelos *-free
-# go run ./cmd/server --config config.example.toml      # OpenAI
-
-# 3. Comprueba que responde:
-curl http://localhost:8080/health
-curl http://localhost:8080/v1/models
+# 2. Arranca
+go run ./cmd/server             # lee .env y usa PROXY_PORT
+go run ./cmd/server --port 9090 # override del puerto
+go run ./cmd/server --env ""    # usa solo el entorno del sistema
 ```
 
-Flags: `--config` (defecto `config.toml`), `--env` (defecto `.env`;
-fichero ausente = se usan las variables del sistema, `--env ""` lo omite),
-`--port` y `--host` (override del toml).
-
-Con `make` (hay `Makefile`):
+Con `make`:
 
 ```powershell
-make setup      # crea .env desde .env.example si no existe
-make run-free   # config.opencode.toml (modelos gratis Zen)
-make run-openai # config.example.toml (OpenAI)
-make run PORT=9090                    # override de puerto
-make run CONFIG=config.toml ENV=.env  # personalizado
-make check      # vet + test
-make build      # genera claude-proxy.exe
+make setup   # crea .env desde .env.example
+make run     # levanta el servidor
+make check   # vet + test
+make build   # genera claude-proxy.exe
 ```
 
 Compilado:
 
 ```powershell
-go build -o claude-proxy ./cmd/server
-.\claude-proxy --config config.opencode.toml --port 8080
+go build -o claude-proxy.exe ./cmd/server
+.\claude-proxy.exe
 ```
 
-## Ejemplo de petición
+## Ejemplos
+
+Listar conectores y modelos:
+
+```powershell
+curl http://localhost:8080/health
+curl http://localhost:8080/v1/models
+```
+
+Petición estilo Anthropic:
 
 ```powershell
 curl http://localhost:8080/v1/messages `
@@ -172,64 +152,107 @@ curl http://localhost:8080/v1/messages `
   -H "x-api-key: lo-que-sea" `
   -H "anthropic-version: 2023-06-01" `
   -d '{
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "opencode-go/minimax-m3",
     "max_tokens": 256,
     "system": "Responde en español.",
-    "messages": [{"role": "user", "content": "Dime qué es un adaptador en 1 línea."}]
+    "messages": [{"role": "user", "content": "¿Quién eres?"}]
   }'
 ```
 
-Streaming (`"stream": true`) devuelve SSE con eventos Anthropic
-(`message_start`, `content_block_start`, `content_block_delta`, …)
-traducidos desde el SSE de OpenAI.
+Con el SDK de Anthropic, apunta `base_url` al proxy:
 
-## Traducción Anthropic ↔ OpenAI
-
-- `system` (string o bloques) → mensajes `system` de OpenAI.
-- Bloques `text` / `image` (base64 → `image_url` data-URI) / `tool_use` → `tool_calls`
-  / `tool_result` → mensajes `tool`.
-- `tools` (`input_schema`) → `tools[].function.parameters`.
-- `tool_choice` (`auto`/`any`/`tool`/`none`) → equivalente OpenAI.
-- `stop_sequences` → `stop`, `max_tokens` → `max_tokens`.
-- Respuesta: `content` + `tool_calls` → bloques `text` + `tool_use`,
-  `usage` (`prompt_tokens`/`completion_tokens` → `input_tokens`/`output_tokens`),
-  `finish_reason` (`tool_calls`→`tool_use`, `length`→`max_tokens`, resto→`end_turn`).
-- Streaming: deltas de texto y `partial_json` de herramientas + secuencia
-  de eventos Anthropic válida (cierra bloques de texto antes de abrir `tool_use`).
-
-## Añadir un adaptador nuevo
-
-1. Implementa `adapter.Adapter` (`internal/adapter/adapter.go`):
-
-```go
-type Adapter interface {
-    Provider() string
-    Handle(ctx context.Context, anthReq *anthropic.MessagesRequest, route config.ResolvedRoute, w http.ResponseWriter, r *http.Request) error
-}
+```python
+from anthropic import Anthropic
+client = Anthropic(base_url="http://localhost:8080", api_key="lo-que-sea")
+client.messages.create(
+    model="opencode-zen/exo-free",
+    max_tokens=256,
+    messages=[{"role": "user", "content": "Hola"}],
+)
 ```
 
-2. Regístralo con `adapter.Register` (ver `init()` en `internal/adapter/openai`).
-3. Úsalo en el `.toml` con `provider = "mi-proveedor"`.
+El streaming (`"stream": true`) devuelve SSE con eventos Anthropic
+(`message_start`, `content_block_start`, `content_block_delta`, …).
 
-Ver `internal/adapter/openai` como referencia completa (no-stream + stream).
+## Usar con Claude Code
+
+El proxy es compatible con Claude Code (probado con v2.1.296, chat + tool
+calling). Apunta la base URL al proxy (raíz, **sin `/v1`):
+
+```powershell
+$env:ANTHROPIC_BASE_URL   = "http://localhost:8080"
+$env:ANTHROPIC_AUTH_TOKEN = "dummy"        # o tu PROXY_AUTH_TOKEN
+$env:ANTHROPIC_MODEL      = "opencode-go/minimax-m3"
+
+# Slots internos (evita 404 en llamadas de fondo con el modelo "haiku")
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL   = "opencode-go/minimax-m3"
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL = "opencode-go/minimax-m3"
+$env:ANTHROPIC_DEFAULT_HAIKU_MODEL  = "opencode-go/glm-5.3-flash"
+
+$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+$env:DISABLE_TELEMETRY = "1"
+
+claude
+```
+
+Notas:
+
+- **Sesión**: Go exige `x-opencode-session`. Claude Code envía su propia
+  cabecera (`X-Claude-Code-Session-Id`) y el proxy la reenvía; si no llega
+  ninguna, genera una.
+- **Modelo personalizado**: `ANTHROPIC_MODEL`/`--model` aceptan el ID con
+  prefijo directamente. Claude Code muestra un aviso informativo de que no
+  conoce el modelo (asume 200k de contexto); se silencia con
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<n>` o mapeándolo con `modelPicker`/
+  `modelOverrides`. No impide funcionar.
+- **`mid-conversation-system`**: el proxy soporta mensajes con
+  `role: "system"` dentro de `messages` (los usa Claude Code).
+- Elige modelos con buen soporte de *tool calling* para tareas de agente
+  (MiniMax, GLM, Kimi, DeepSeek, Qwen, Claude Haiku…).
+
+## Traducción
+
+- **Messages nativo** (`/messages`): se reenvía la petición Anthropic tal
+  cual (solo se cambia el `model`), autenticando con `x-api-key`. Camino
+  preferido cuando el modelo lo soporta.
+- **Chat Completions** (Zen, Go, OpenAI): `system` → mensaje `system`,
+  bloques `text`/`image`/`tool_use`/`tool_result` ↔ `messages`/`tool_calls`,
+  `tools` (`input_schema` → `parameters`), `tool_choice`, `stop_sequences`,
+  `max_tokens`; respuesta y streaming traducidos a eventos Anthropic.
+- **Responses API**: los modelos `grok`, `gpt-luna` y `muse-spark` se
+  sirven por `/responses`; el conector los traduce automáticamente.
+- Los mensajes `role: "system"` a mitad de conversación se soportan en las
+  tres rutas.
 
 ## Estructura
 
 ```text
-cmd/server/main.go
-config.example.toml
-config.opencode.toml             # rutas de los modelos gratuitos de OpenCode Zen
-internal/anthropic/types.go      # tipos del estándar Anthropic
-internal/openai/types.go         # tipos del estándar OpenAI Chat Completions
-internal/responses/types.go      # tipos de OpenAI Responses API
-internal/config/config.go        # carga .toml + resolución por modelo
-internal/translate/translate.go  # Anthropic→OpenAI y OpenAI→Anthropic
-internal/translate/stream.go     # SSE OpenAI → SSE Anthropic
-internal/translate/responses.go  # Anthropic↔Responses (+responses_stream.go)
-internal/adapter/adapter.go      # interfaz + registry
-internal/adapter/openai/openai.go
-internal/adapter/anthropic/anthropic.go
-internal/adapter/opencode/opencode.go      # provider "opencode" (Zen chat)
-internal/adapter/opencode/responses.go     # provider "opencode-responses"
-internal/server/server.go        # mux, middlewares, handlers
+cmd/server/main.go                       # arranque + registro de conectores
+internal/config/config.go                # Settings desde el entorno
+internal/env/env.go                      # carga .env + helpers (bool/int/CSV)
+internal/anthropic/types.go              # tipos del estándar Anthropic
+internal/openai/types.go                 # tipos de Chat Completions
+internal/responses/types.go              # tipos de la Responses API
+internal/translate/                      # Anthropic↔OpenAI y Anthropic↔Responses
+internal/connector/connector.go          # interfaz, registro, helpers HTTP
+internal/connector/opencode/opencode.go  # conectores Zen y Go
+internal/connector/openai/openai.go      # conector OpenAI genérico
+internal/server/server.go                # mux, auth, /v1/models, /v1/messages
 ```
+
+## Añadir un conector
+
+1. Implementa `connector.Connector`:
+
+```go
+type Connector interface {
+    Name() string
+    Models(ctx context.Context) ([]connector.Model, error)
+    Chat(ctx context.Context, req *anthropic.MessagesRequest, targetModel string, w http.ResponseWriter, r *http.Request) error
+}
+```
+
+2. Regístralo en `buildRegistry` (`cmd/server/main.go`) tras leer su flag
+   booleano del entorno.
+
+Ver `internal/connector/openai` como referencia completa (listado + chat).

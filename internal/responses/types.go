@@ -3,7 +3,6 @@
 // Referencia: Open Responses spec (openresponses.org) y docs de OpenAI.
 package responses
 
-
 // Request es POST {base_url}/responses.
 type Request struct {
 	Model           string   `json:"model"`
@@ -27,11 +26,11 @@ type Tool struct {
 
 // Response es la respuesta no-stream.
 type Response struct {
-	ID     string       `json:"id"`
-	Model  string       `json:"model"`
-	Status string       `json:"status"`
-	Output []OutputItem `json:"output"`
-	Usage  *Usage       `json:"usage,omitempty"`
+	ID                string             `json:"id"`
+	Model             string             `json:"model"`
+	Status            string             `json:"status"`
+	Output            []OutputItem       `json:"output"`
+	Usage             *Usage             `json:"usage,omitempty"`
 	IncompleteDetails *IncompleteDetails `json:"incomplete_details,omitempty"`
 }
 
@@ -41,14 +40,14 @@ type IncompleteDetails struct {
 
 // OutputItem es un item de output (message | function_call | reasoning | ...).
 type OutputItem struct {
-	Type      string         `json:"type"`
-	ID        string         `json:"id,omitempty"`
-	Role      string         `json:"role,omitempty"`
-	Status    string         `json:"status,omitempty"`
-	Content   []ContentPart  `json:"content,omitempty"`
-	CallID    string         `json:"call_id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Arguments string         `json:"arguments,omitempty"`
+	Type      string        `json:"type"`
+	ID        string        `json:"id,omitempty"`
+	Role      string        `json:"role,omitempty"`
+	Status    string        `json:"status,omitempty"`
+	Content   []ContentPart `json:"content,omitempty"`
+	CallID    string        `json:"call_id,omitempty"`
+	Name      string        `json:"name,omitempty"`
+	Arguments string        `json:"arguments,omitempty"`
 }
 
 type ContentPart struct {

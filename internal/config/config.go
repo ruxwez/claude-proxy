@@ -1,176 +1,68 @@
-// Package config carga el .toml y resuelve qué proveedor/modelo
-// corresponde a cada modelo Anthropic solicitado por el cliente.
+// Package config construye la configuración del servidor a partir de las
+// variables de entorno (normalmente cargadas desde un fichero .env).
+//
+// No hay fichero TOML: cada conector se activa con un flag booleano.
 package config
 
 import (
-	"fmt"
-	"os"
-	"path"
 	"strings"
+	"time"
 
-	"github.com/BurntSushi/toml"
+	"github.com/ruxwez/claude-proxy/internal/env"
 )
 
-// Config es el contenido del .toml.
-type Config struct {
-	Server  ServerConfig `toml:"server"`
-	Default *Route       `toml:"default"`
-	Routes  []Route      `toml:"routes"`
+// Base URLs por defecto de los proveedores.
+const (
+	ZenBaseURL    = "https://opencode.ai/zen/v1"
+	GoBaseURL     = "https://opencode.ai/zen/go/v1"
+	OpenAIBaseURL = "https://api.openai.com/v1"
+)
+
+// Settings es la configuración completa del servidor.
+type Settings struct {
+	Host      string        // PROXY_HOST (def. 0.0.0.0)
+	Port      int           // PROXY_PORT (def. 8080)
+	AuthToken string        // PROXY_AUTH_TOKEN (vacío = sin auth)
+	Timeout   time.Duration // REQUEST_TIMEOUT_SECONDS (def. 120s)
+
+	// OpenCode: Zen y Go comparten la misma API key.
+	OpenCodeAPIKey string // OPENCODE_API_KEY
+	ZenEnabled     bool   // OPENCODE_ZEN_ENABLED
+	GoEnabled      bool   // OPENCODE_GO_ENABLED
+
+	// Conector OpenAI genérico.
+	OpenAI OpenAI
 }
 
-type ServerConfig struct {
-	Host      string `toml:"host"`
-	Port      int    `toml:"port"`
-	AuthToken string `toml:"auth_token"`
-	LogLevel  string `toml:"log_level"`
+// OpenAI agrupa la configuración del conector OpenAI genérico.
+type OpenAI struct {
+	Enabled bool     // OPENAI_ENABLED
+	APIKey  string   // OPENAI_API_KEY
+	BaseURL string   // OPENAI_BASE_URL (def. https://api.openai.com/v1)
+	Models  []string // OPENAI_MODELS (opcional, CSV; evita consultar /models)
 }
 
-// Route es una entrada [[routes]] (o [default] sin anthropic_model).
-type Route struct {
-	AnthropicModel string            `toml:"anthropic_model"`
-	Provider       string            `toml:"provider"`
-	TargetModel    string            `toml:"target_model"`
-	BaseURL        string            `toml:"base_url"`
-	APIKey         string            `toml:"api_key"`
-	APIKeyEnv      string            `toml:"api_key_env"`
-	TimeoutSeconds int               `toml:"timeout_seconds"`
-	ExtraHeaders   map[string]string `toml:"extra_headers"`
-}
+// Load lee la configuración del entorno y aplica los valores por defecto.
+func Load() Settings {
+	s := Settings{
+		Host:      env.Get("PROXY_HOST", "0.0.0.0"),
+		Port:      env.Int("PROXY_PORT", 8080),
+		AuthToken: env.Get("PROXY_AUTH_TOKEN", ""),
+		Timeout:   time.Duration(env.Int("REQUEST_TIMEOUT_SECONDS", 120)) * time.Second,
 
-// ResolvedRoute es una ruta con valores finales (key resuelta, defaults).
-type ResolvedRoute struct {
-	AnthropicModel string
-	Provider       string
-	TargetModel    string
-	BaseURL        string
-	APIKey         string
-	TimeoutSeconds int
-	ExtraHeaders   map[string]string
-}
+		OpenCodeAPIKey: env.Get("OPENCODE_API_KEY", ""),
+		ZenEnabled:     env.Bool("OPENCODE_ZEN_ENABLED", false),
+		GoEnabled:      env.Bool("OPENCODE_GO_ENABLED", false),
 
-// Load lee y valida el fichero TOML.
-func Load(path string) (*Config, error) {
-	var cfg Config
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return nil, fmt.Errorf("leer config %s: %w", path, err)
+		OpenAI: OpenAI{
+			Enabled: env.Bool("OPENAI_ENABLED", false),
+			APIKey:  env.Get("OPENAI_API_KEY", ""),
+			BaseURL: strings.TrimRight(env.Get("OPENAI_BASE_URL", OpenAIBaseURL), "/"),
+			Models:  env.CSV("OPENAI_MODELS"),
+		},
 	}
-	if cfg.Server.Port == 0 {
-		cfg.Server.Port = 8080
+	if s.Timeout <= 0 {
+		s.Timeout = 120 * time.Second
 	}
-	if cfg.Server.Host == "" {
-		cfg.Server.Host = "0.0.0.0"
-	}
-	for i := range cfg.Routes {
-		if err := normalize(&cfg.Routes[i]); err != nil {
-			return nil, fmt.Errorf("routes[%d]: %w", i, err)
-		}
-	}
-	if cfg.Default != nil {
-		if err := normalize(cfg.Default); err != nil {
-			return nil, fmt.Errorf("default: %w", err)
-		}
-		if cfg.Default.Provider == "" {
-			return nil, fmt.Errorf("default: provider vacío")
-		}
-		if cfg.Default.TargetModel == "" {
-			return nil, fmt.Errorf("default: target_model vacío")
-		}
-	}
-	return &cfg, nil
-}
-
-func normalize(r *Route) error {
-	r.Provider = strings.ToLower(strings.TrimSpace(r.Provider))
-	r.BaseURL = strings.TrimRight(strings.TrimSpace(r.BaseURL), "/")
-	if r.TimeoutSeconds <= 0 {
-		r.TimeoutSeconds = 120
-	}
-	if r.Provider == "" {
-		return fmt.Errorf("provider vacío")
-	}
-	switch r.Provider {
-	case "openai":
-		if r.BaseURL == "" {
-			r.BaseURL = "https://api.openai.com/v1"
-		}
-	case "anthropic":
-		if r.BaseURL == "" {
-			r.BaseURL = "https://api.anthropic.com/v1"
-		}
-	case "opencode", "opencode-responses":
-		if r.BaseURL == "" {
-			r.BaseURL = "https://opencode.ai/zen/v1"
-		}
-	}
-	if r.TargetModel == "" {
-		return fmt.Errorf("target_model vacío")
-	}
-	return nil
-}
-
-// Resolve busca la ruta para un modelo Anthropic:
-// 1) coincidencia exacta, 2) comodín path.Match, 3) default.
-// Si target_model es "*", se usa el modelo solicitado tal cual
-// (útil para flotas como los *-free de OpenCode Zen).
-func (c *Config) Resolve(model string) (ResolvedRoute, error) {
-	for _, r := range c.Routes {
-		if r.AnthropicModel == model {
-			return c.resolveWith(model, r), nil
-		}
-	}
-	for _, r := range c.Routes {
-		pat := r.AnthropicModel
-		if pat == "" || !strings.Contains(pat, "*") {
-			continue
-		}
-		ok, err := path.Match(pat, model)
-		if err == nil && ok {
-			return c.resolveWith(model, r), nil
-		}
-	}
-	if c.Default != nil {
-		return c.resolveWith(model, *c.Default), nil
-	}
-	return ResolvedRoute{}, fmt.Errorf("modelo %q no configurado y sin [default]", model)
-}
-
-func (c *Config) resolveWith(model string, r Route) ResolvedRoute {
-	rr := c.resolve(r)
-	if rr.TargetModel == "*" {
-		rr.TargetModel = model
-	}
-	return rr
-}
-
-func (c *Config) resolve(r Route) ResolvedRoute {
-	return ResolvedRoute{
-		AnthropicModel: r.AnthropicModel,
-		Provider:       r.Provider,
-		TargetModel:    r.TargetModel,
-		BaseURL:        r.BaseURL,
-		APIKey:         resolveKey(r),
-		TimeoutSeconds: r.TimeoutSeconds,
-		ExtraHeaders:   r.ExtraHeaders,
-	}
-}
-
-func resolveKey(r Route) string {
-	if r.APIKey != "" {
-		return os.ExpandEnv(r.APIKey)
-	}
-	if r.APIKeyEnv != "" {
-		return os.Getenv(r.APIKeyEnv)
-	}
-	return ""
-}
-
-// Models lista los anthropic_model configurados (para GET /v1/models).
-func (c *Config) Models() []string {
-	out := make([]string, 0, len(c.Routes))
-	for _, r := range c.Routes {
-		if r.AnthropicModel != "" {
-			out = append(out, r.AnthropicModel)
-		}
-	}
-	return out
+	return s
 }
