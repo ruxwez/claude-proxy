@@ -1,0 +1,162 @@
+# claude-proxy — configuración para los modelos GRATUITOS de OpenCode Zen.
+#
+# Cómo obtener la key:
+#   1. Entra en https://opencode.ai/auth, crea cuenta y copia tu API key de Zen.
+#   2. Expónla como variable de entorno:
+#        $env:OPENCODE_API_KEY = "..."   (PowerShell)
+#        export OPENCODE_API_KEY="..."    (bash)
+#   3. Arranca: go run ./cmd/server --config config.opencode.toml
+#
+# Verificado contra GET https://opencode.ai/zen/v1/models (09/10/2026).
+# Todos son "Free" por tiempo limitado según https://opencode.ai/docs/zen/#pricing.
+# Privacidad: durante el periodo gratuito algunos proveedores pueden usar los
+# datos para mejorar el modelo (big-pickle, exo, mimo, ling, nemotron).
+# Excepciones zero-retention: space-bunny-free, longcat-2.5-preview-free,
+# step-5-preview-free. Muse Spark Contributor usa tus prompts para entrenar.
+#
+# No incluido: jev-1.13-free (endpoint /systemone, no es un chat: no admite
+# el estándar Anthropic Messages y queda fuera del alcance de este proxy).
+
+[server]
+host = "0.0.0.0"
+port = 8080
+# auth_token = "sk-proxy-secreto"  # opcional: protege tu proxy local
+
+# Por defecto: cualquier otro modelo *-free futuro va a Zen tal cual.
+[default]
+provider = "opencode"
+target_model = "*"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+# --- Chat Completions (provider "opencode") ---
+
+[[routes]]
+anthropic_model = "big-pickle"
+provider = "opencode"
+target_model = "big-pickle"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "space-bunny-free"
+provider = "opencode"
+target_model = "space-bunny-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "longcat-2.5-preview-free"
+provider = "opencode"
+target_model = "longcat-2.5-preview-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "step-5-preview-free"
+provider = "opencode"
+target_model = "step-5-preview-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "exo-free"
+provider = "opencode"
+target_model = "exo-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "mimo-v2.6-flash-free"
+provider = "opencode"
+target_model = "mimo-v2.6-flash-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+# En docs pero ausente del /models en vivo el 09/10/2026; se mantiene por si vuelve.
+[[routes]]
+anthropic_model = "mimo-v2.5-free"
+provider = "opencode"
+target_model = "mimo-v2.5-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "ling-3.1-flash-free"
+provider = "opencode"
+target_model = "ling-3.1-flash-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "ling-3.0-flash-fin-free"
+provider = "opencode"
+target_model = "ling-3.0-flash-fin-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "nemotron-3-ultra-free"
+provider = "opencode"
+target_model = "nemotron-3-ultra-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+[[routes]]
+anthropic_model = "nemotron-3.5-lightning-free"
+provider = "opencode"
+target_model = "nemotron-3.5-lightning-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+# --- Responses API (provider "opencode-responses") ---
+# Zen solo sirve estos modelos en /responses, no en /chat/completions.
+
+[[routes]]
+anthropic_model = "muse-spark-1.3-contributor-free"
+provider = "opencode-responses"
+target_model = "muse-spark-1.3-contributor-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+# No está en docs pero sí en el /models en vivo el 09/10/2026.
+[[routes]]
+anthropic_model = "muse-spark-1.2-contributor-free"
+provider = "opencode-responses"
+target_model = "muse-spark-1.2-contributor-free"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+# Comodín: futuros modelos *-free de Zen funcionan sin editar el fichero.
+[[routes]]
+anthropic_model = "*-free"
+provider = "opencode"
+target_model = "*"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+timeout_seconds = 120
+
+# --- Alternativa OpenCode Go (suscripción, no gratis salvo longcat/step) ---
+# Descomenta y pon tu key de Go (misma OPENCODE_API_KEY) para usar
+# https://opencode.ai/zen/go/v1 con los modelos de https://opencode.ai/docs/go/.
+# [[routes]]
+# anthropic_model = "opencode-go-*"
+# provider = "opencode"
+# target_model = "*"
+# base_url = "https://opencode.ai/zen/go/v1"
+# api_key_env = "OPENCODE_API_KEY"
+# timeout_seconds = 120
