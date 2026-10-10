@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+.git
+target
+work
+outputs
+*.exe
+*.zip
+config.toml

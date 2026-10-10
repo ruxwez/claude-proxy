@@ -1,55 +1,69 @@
-# claude-proxy — atajos para compilar, testear y levantar el servidor.
-#
-# Uso:
-#   make setup      # crea .env desde .env.example (si no existe)
-#   make run        # levanta el servidor (lee .env)
-#   make run PORT=9090 ENV=.env
-#   make test vet check build clean
-#
-# Variables (override: make run PORT=9090):
-#   ENV     fichero .env con las keys y flags (defecto: .env; "" = omitir)
-#   PORT    puerto (defecto: 8080; "" = usar PROXY_PORT del .env)
+CARGO ?= cargo
+ENV ?= .env
+PORT ?= 10800
+ENDPOINT ?= http://localhost:10800
 
+ifeq ($(OS),Windows_NT)
 SHELL := powershell.exe
 .SHELLFLAGS := -NoProfile -Command
+else
+SHELL := /bin/sh
+endif
 
-GO ?= go
-BIN ?= claude-proxy
-ENV ?= .env
-PORT ?= 8080
+.PHONY: help setup build run update-models preview-models install-cli test fmt lint check clean docker-build docker-up docker-down docker-logs
 
-.PHONY: help setup tidy vet test check build run clean
+help:
+	@echo "setup build run test fmt lint check install-cli update-models preview-models"
+	@echo "docker-build docker-up docker-down docker-logs clean"
+	@echo "ENV=.env PORT=10800 ENDPOINT=http://localhost:10800"
 
-help: ## Muestra esta ayuda
-	@echo "Targets disponibles:"
-	@echo "  setup  - crea .env desde .env.example si no existe"
-	@echo "  run    - levanta el servidor con ENV/PORT actuales"
-	@echo "  test   - ejecuta los tests"
-	@echo "  vet    - analisis estatico (go vet)"
-	@echo "  check  - vet + test"
-	@echo "  build  - compila el binario $(BIN).exe"
-	@echo "  tidy   - ordena go.mod/go.sum"
-	@echo "  clean  - borra el binario compilado"
+setup:
+ifeq ($(OS),Windows_NT)
+	@if (!(Test-Path .env)) { Copy-Item .env.example .env }
+else
+	@test -f .env || cp .env.example .env
+endif
 
-setup: ## Crea .env desde .env.example si no existe
-	@if (!(Test-Path .env)) { Copy-Item .env.example .env; echo ".env creado, editalo y rellena tus keys." } else { echo ".env ya existe, no se toca." }
+build:
+	$(CARGO) build --workspace --release --locked
 
-tidy: ## Ordena dependencias
-	$(GO) mod tidy
+run:
+	$(CARGO) run --locked -p claude-proxy -- --env "$(ENV)" --port $(PORT)
 
-vet: ## Analisis estatico
-	$(GO) vet ./...
+install-cli:
+	$(CARGO) install --locked --path crates/cli
 
-test: ## Ejecuta los tests
-	$(GO) test ./... -count=1
+update-models:
+	$(CARGO) run --locked -p claude-update-models -- --endpoint "$(ENDPOINT)"
 
-check: vet test ## vet + test
+preview-models:
+	$(CARGO) run --locked -p claude-update-models -- --endpoint "$(ENDPOINT)" --dry-run
 
-build: ## Compila el binario
-	$(GO) build -o $(BIN).exe ./cmd/server
+test:
+	$(CARGO) test --workspace --locked
 
-run: ## Levanta el servidor (ENV y PORT configurables)
-	$(GO) run ./cmd/server --env "$(ENV)" --port $(PORT)
+fmt:
+	$(CARGO) fmt --all
 
-clean: ## Borra el binario compilado
-	Remove-Item -Force $(BIN).exe -ErrorAction SilentlyContinue
+lint:
+	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
+
+check:
+	$(CARGO) fmt --all -- --check
+	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
+	$(CARGO) test --workspace --locked
+
+clean:
+	$(CARGO) clean
+
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d --build
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f

@@ -2,3 +2,5 @@ claude-proxy
 claude-proxy.exe
 config.toml
 .env
+/target/
+*.update-models.lock

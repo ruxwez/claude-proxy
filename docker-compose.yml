@@ -1,0 +1,17 @@
+services:
+  claude-proxy:
+    build:
+      context: .
+      target: proxy
+    image: claude-proxy:rust
+    container_name: claude-proxy
+    restart: unless-stopped
+    # Docker reads .env and injects configuration at runtime.
+    env_file:
+      - .env
+    environment:
+      PROXY_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:${PROXY_PORT:-10800}:${PROXY_PORT:-10800}"
+    init: true
+    stop_grace_period: 20s
