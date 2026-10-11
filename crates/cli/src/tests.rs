@@ -1,4 +1,4 @@
-use crate::{Args, Model, configured, fetch_models, filter_models, run, urls};
+use crate::{Args, Model, configured, fetch_models, run, urls};
 use axum::{Json, Router, extract::Query, routing::get};
 use serde_json::{Value, json};
 use std::{collections::HashMap, fs};
@@ -10,10 +10,10 @@ async fn mock(value: Value) -> (String, tokio::task::JoinHandle<()>) {
             get(|| async { Json(json!({"providers":{"p":{"models":{"a":{"limit":{"context":1_000_000}}}}},"models":{}})) }),
         )
         .route(
-            "/v1/models",
+            "/api/cli-config",
             get(move || {
                 let v = value.clone();
-                async { Json(v) }
+                async move { let mut v=v; v["anthropic_base_url"]=json!("http://localhost:10800"); Json(v) }
             }),
         );
     serve(app).await
@@ -40,7 +40,6 @@ fn models() -> Vec<Model> {
 }
 fn args(base: &str, path: std::path::PathBuf) -> Args {
     Args {
-        models_url: format!("{base}/models.json"),
         endpoint: base.into(),
         settings: Some(path),
         default_model: None,
@@ -55,12 +54,12 @@ fn base_url_normalization_and_validation() {
     for s in [
         "http://localhost:10800",
         "http://localhost:10800/",
-        "http://localhost:10800/v1",
-        "http://localhost:10800/v1/models?limit=1",
+        "http://localhost:10800/api",
+        "http://localhost:10800/api/cli-config?limit=1",
     ] {
         let (base, url) = urls(s).unwrap();
         assert_eq!(base, "http://localhost:10800");
-        assert_eq!(url.as_str(), "http://localhost:10800/v1/models");
+        assert_eq!(url.as_str(), "http://localhost:10800/api/cli-config");
     }
     assert!(urls("file:///tmp/settings").is_err());
     assert!(urls("http://user:pass@localhost").is_err());
@@ -83,7 +82,7 @@ fn preserves_preferences_and_updates_retired_aliases() {
     assert_eq!(next["model"], "opencode-go/deepseek-v4.1-flash");
     assert_eq!(
         next["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
-        "opencode-go/claude-haiku-5-5"
+        "opencode-go/deepseek-v4.1-flash"
     );
     assert!(
         next["env"]
@@ -91,8 +90,8 @@ fn preserves_preferences_and_updates_retired_aliases() {
             .is_none()
     );
     assert_eq!(next["modelPicker"]["options"].as_array().unwrap().len(), 2);
-    assert_eq!(next["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "990000");
-    assert_eq!(next["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "900000");
+    assert!(next["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none());
+    assert!(next["env"].get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").is_none());
     assert_eq!(
         configured(
             next.clone(),
@@ -126,97 +125,27 @@ fn preserves_preferences_and_updates_retired_aliases() {
     );
 }
 
-#[test]
-fn context_filter_uses_exact_provider_limits_and_explicit_canonical_links() {
-    let contexts = json!({"providers":{
-        "p":{"models":{
-            "exact":{"limit":{"context":1_000_000}},
-            "large":{"limit":{"context":1_048_576}},
-            "small":{"limit":{"context":999_999},"canonical_model_id":"vendor/large"},
-            "muse-contributor":{"limit":{"context":1_048_576}},
-            "linked":{"canonical_model_id":"vendor/large"},
-            "luna":{"limit":{"context":1_050_000,"input":922_000}},
-            "boundary":{"limit":{"context":1_000_000,"input":990_000}},
-            "invalid":{"limit":{"context":"1000000"},"canonical_model_id":"vendor/large"},
-            "invalid-input":{"limit":{"context":1_000_000,"input":"unknown"}},
-            "linked-input":{"limit":{"context":1_000_000},"canonical_model_id":"vendor/luna"}
-        }},
-        "other":{"models":{"unknown":{"limit":{"context":1_000_000}}}}
-    },"models":{
-        "vendor/large":{"limit":{"context":1_048_576}},
-        "vendor/luna":{"limit":{"context":1_050_000,"input":922_000}}
-    }});
-    let models = [
-        "p/exact",
-        "p/large",
-        "p/small",
-        "p/unknown",
-        "p/muse-contributor",
-        "p/linked",
-        "p/luna",
-        "p/boundary",
-        "p/invalid",
-        "p/invalid-input",
-        "p/linked-input",
-        "p/base-contributor",
-    ]
-    .into_iter()
-    .map(|id| Model {
-        id: id.into(),
-        display_name: String::new(),
-    })
-    .collect();
-    let (accepted, excluded) = filter_models(models, &contexts);
-    assert_eq!(
-        accepted.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-        [
-            "p/exact",
-            "p/large",
-            "p/muse-contributor",
-            "p/linked",
-            "p/boundary"
-        ]
-    );
-    assert_eq!(excluded.len(), 7);
-    assert!(
-        excluded
-            .iter()
-            .any(|s| s.contains("unknown: contexto desconocido"))
-    );
-}
-
 #[tokio::test]
-async fn failed_or_unmatched_metadata_preserves_settings() {
-    for metadata in [
-        json!({}),
-        json!({"providers":{"p":{"models":{"a":{"limit":{"context":200_000}}}}},"models":{}}),
-        json!({"providers":{"p":{"models":{"other":{"limit":{"context":1_000_000}}}}},"models":{}}),
-        json!({"providers":{"p":{"models":{"a":{"limit":{"context":"1000000"}}}}},"models":{}}),
-    ] {
-        let app = Router::new()
-            .route(
-                "/v1/models",
-                get(|| async { Json(json!({"data":[{"id":"p/a"}]})) }),
-            )
-            .route(
-                "/models.json",
-                get(move || {
-                    let metadata = metadata.clone();
-                    async { Json(metadata) }
-                }),
-            );
-        let (base, task) = serve(app).await;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, b"{\"theme\":\"keep\"}").unwrap();
-        let mut options = args(&base, path.clone());
-        assert!(run(&options).await.is_err());
-        options.models_url = format!("{base}/missing");
-        assert!(run(&options).await.is_err());
-        assert_eq!(fs::read(&path).unwrap(), b"{\"theme\":\"keep\"}");
-        assert!(!dir.path().join("backups").exists());
-        task.abort();
-    }
+async fn injects_small_models_and_server_preferences_without_external_metadata() {
+    let app = Router::new().route("/api/cli-config", get(|| async {
+        Json(json!({"data":[{"id":"p/small"},{"id":"p/custom"}],"anthropic_base_url":"http://localhost:12345","default_model":"p/custom","env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"32000","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"28000"}}))
+    }));
+    let (base, task) = serve(app).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    run(&args(&base, path.clone())).await.unwrap();
+    let settings: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(settings["model"], "p/custom");
+    assert_eq!(
+        settings["modelPicker"]["options"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        settings["env"]["ANTHROPIC_BASE_URL"],
+        "http://localhost:12345"
+    );
+    assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "32000");
+    task.abort();
 }
 
 #[test]
@@ -247,7 +176,7 @@ fn filtered_aliases_are_replaced_and_compaction_stays_enabled() {
 #[tokio::test]
 async fn fetches_all_pages_deduplicated_and_sorted() {
     let app = Router::new().route(
-        "/v1/models",
+        "/api/cli-config",
         get(|Query(q): Query<HashMap<String, String>>| async move {
             assert_eq!(q.get("refresh").unwrap(), "true");
             Json(if q.contains_key("after_id") {
@@ -262,7 +191,7 @@ async fn fetches_all_pages_deduplicated_and_sorted() {
         .await
         .unwrap();
     assert_eq!(
-        found.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        found.data.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
         vec!["p/a", "p/b"]
     );
     task.abort();

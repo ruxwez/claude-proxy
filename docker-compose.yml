@@ -6,12 +6,13 @@ services:
     image: claude-proxy:rust
     container_name: claude-proxy
     restart: unless-stopped
-    # Docker reads .env and injects configuration at runtime.
-    env_file:
-      - .env
-    environment:
-      PROXY_HOST: "0.0.0.0"
+    command: ["--host", "0.0.0.0", "--database", "/data/proxy.sqlite3"]
     ports:
-      - "127.0.0.1:${PROXY_PORT:-10800}:${PROXY_PORT:-10800}"
+      - "127.0.0.1:10800:10800"
+      - "127.0.0.1:10801:10801"
+    volumes:
+      - proxy-data:/data
     init: true
     stop_grace_period: 20s
+volumes:
+  proxy-data:

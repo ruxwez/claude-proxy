@@ -1,0 +1,204 @@
+{
+  "checks": [
+    {
+      "date_utc": "2026-10-11T10:02:45Z",
+      "model": "opencode-go/gpt-6-luna",
+      "mode": "subagents",
+      "claude_code_version": "2.1.296",
+      "invoked_tools": [
+        "Agent",
+        "Agent"
+      ],
+      "forwarded_child_messages": 4,
+      "task_events": {
+        "task_started": 2,
+        "task_progress": 0,
+        "task_notification": 2
+      },
+      "workflow_calls": [],
+      "completed": true,
+      "report_file": "claude-responses-subagents.json",
+      "upstream_request_count": 4,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 0,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T10:04:41Z",
+      "model": "opencode-go/gpt-6-luna",
+      "mode": "workflow",
+      "claude_code_version": "2.1.296",
+      "invoked_tools": [
+        "Workflow"
+      ],
+      "forwarded_child_messages": 0,
+      "task_events": {
+        "task_started": 1,
+        "task_progress": 2,
+        "task_notification": 1
+      },
+      "workflow_child_requests": 2,
+      "workflow_calls": [
+        {
+          "input_fields": [
+            "script"
+          ],
+          "contains_parallel_or_promise_all": true
+        }
+      ],
+      "result_markers": [
+        "WORKFLOW_OK",
+        "ALPHA_42",
+        "BETA_43"
+      ],
+      "completed": true,
+      "report_file": "claude-responses-workflow.json",
+      "upstream_request_count": 5,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 1,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T10:04:41Z",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "mode": "subagents",
+      "claude_code_version": "2.1.296",
+      "invoked_tools": [
+        "Agent",
+        "Agent"
+      ],
+      "forwarded_child_messages": 6,
+      "task_events": {
+        "task_started": 2,
+        "task_progress": 0,
+        "task_notification": 2
+      },
+      "workflow_calls": [],
+      "result_markers": [
+        "SUBAGENTS_OK",
+        "ALPHA_42",
+        "BETA_43"
+      ],
+      "completed": true,
+      "report_file": "claude-subagents.json",
+      "upstream_request_count": 4,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 1,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T10:05:27Z",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "mode": "workflow",
+      "claude_code_version": "2.1.296",
+      "invoked_tools": [
+        "Workflow"
+      ],
+      "forwarded_child_messages": 0,
+      "task_events": {
+        "task_started": 1,
+        "task_progress": 3,
+        "task_notification": 1
+      },
+      "workflow_child_requests": 2,
+      "workflow_calls": [
+        {
+          "input_fields": [
+            "script"
+          ],
+          "contains_parallel_or_promise_all": true
+        }
+      ],
+      "result_markers": [
+        "WORKFLOW_OK",
+        "ALPHA_42",
+        "BETA_43"
+      ],
+      "completed": true,
+      "report_file": "claude-workflow.json",
+      "upstream_request_count": 5,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 2,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T09:54:35Z",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "mode": "roundtrip",
+      "stream": false,
+      "calls": 1,
+      "states": 1,
+      "completed": true,
+      "report_file": "deepseek-json.json",
+      "upstream_request_count": 2,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 1,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T09:55:16Z",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "mode": "roundtrip",
+      "stream": true,
+      "calls": 1,
+      "states": 1,
+      "completed": true,
+      "report_file": "deepseek-stream.json",
+      "upstream_request_count": 2,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 1,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T09:57:07Z",
+      "model": "opencode-go/gpt-5.6-luna",
+      "mode": "roundtrip",
+      "stream": true,
+      "calls": 1,
+      "states": 1,
+      "completed": true,
+      "report_file": "responses-56-stream.json",
+      "upstream_request_count": 2,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 1,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T09:57:06Z",
+      "model": "opencode-go/gpt-6-luna",
+      "mode": "roundtrip",
+      "stream": false,
+      "calls": 1,
+      "states": 1,
+      "completed": true,
+      "report_file": "responses-json.json",
+      "upstream_request_count": 2,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 1,
+      "all_replays_match_prior_output": true
+    },
+    {
+      "date_utc": "2026-10-11T09:59:52Z",
+      "model": "opencode-go/gpt-6-luna",
+      "mode": "roundtrip",
+      "stream": true,
+      "calls": 1,
+      "states": 1,
+      "completed": true,
+      "report_file": "responses-stream.json",
+      "upstream_request_count": 2,
+      "all_http_200": true,
+      "all_requests_use_target_model": true,
+      "max_replayed_states_in_request": 1,
+      "all_replays_match_prior_output": true
+    }
+  ]
+}

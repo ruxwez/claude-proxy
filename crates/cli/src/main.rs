@@ -16,14 +16,11 @@ use std::{
     about = "Sincroniza los modelos de un proxy Anthropic con Claude Code"
 )]
 struct Args {
-    /// Catálogo de capacidades de models.dev
-    #[arg(long, default_value = "https://models.dev/catalog.json?type=all")]
-    models_url: String,
-    /// URL base del proxy, o URL completa de /v1/models
+    /// URL de la UI/API interna, o URL completa de /api/cli-config
     #[arg(
         long,
         env = "CLAUDE_PROXY_URL",
-        default_value = "http://localhost:10800"
+        default_value = "http://localhost:10801"
     )]
     endpoint: String,
     /// Archivo settings.json; por defecto CLAUDE_CONFIG_DIR o ~/.claude/settings.json
@@ -62,6 +59,10 @@ struct Page {
     last_id: Option<String>,
     #[serde(default)]
     errors: Vec<Value>,
+    anthropic_base_url: Option<String>,
+    default_model: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 fn urls(endpoint: &str) -> Result<(String, reqwest::Url)> {
@@ -78,17 +79,17 @@ fn urls(endpoint: &str) -> Result<(String, reqwest::Url)> {
     url.set_fragment(None);
     let path = url.path().trim_end_matches('/').to_string();
     let base_path = path
-        .strip_suffix("/v1/models")
-        .or_else(|| path.strip_suffix("/v1"))
+        .strip_suffix("/api/cli-config")
+        .or_else(|| path.strip_suffix("/api"))
         .unwrap_or(&path)
         .to_string();
     url.set_path(&base_path);
     let base = url.as_str().trim_end_matches('/').to_string();
-    let models = reqwest::Url::parse(&format!("{base}/v1/models"))?;
+    let models = reqwest::Url::parse(&format!("{base}/api/cli-config"))?;
     Ok((base, models))
 }
 
-async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Vec<Model>> {
+async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Page> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout))
         .redirect(reqwest::redirect::Policy::none())
@@ -118,7 +119,7 @@ async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Vec<
             );
             bytes.extend(chunk);
         }
-        let page: Page = serde_json::from_slice(&bytes).context("JSON de modelos inválido")?;
+        let mut page: Page = serde_json::from_slice(&bytes).context("JSON de modelos inválido")?;
         ensure!(
             page.errors.is_empty(),
             "El proxy devolvió un catálogo parcial; no se modifica Claude Code"
@@ -127,7 +128,7 @@ async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Vec<
             !page.has_more || !page.data.is_empty(),
             "Paginación inválida: página vacía con has_more"
         );
-        for model in page.data {
+        for model in std::mem::take(&mut page.data) {
             ensure!(
                 !model.id.trim().is_empty()
                     && model.id.trim() == model.id
@@ -141,7 +142,8 @@ async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Vec<
                 !models.is_empty(),
                 "Catálogo vacío; no se modifica Claude Code"
             );
-            return Ok(models.into_values().collect());
+            page.data = models.into_values().collect();
+            return Ok(page);
         }
         let next = page
             .last_id
@@ -154,78 +156,6 @@ async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Vec<
         cursor = Some(next);
     }
     bail!("Demasiadas páginas en el catálogo")
-}
-
-async fn fetch_contexts(url: &str, timeout: u64) -> Result<Value> {
-    // This request deliberately carries no proxy credentials.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .context("No se pudo consultar models.dev")?
-        .error_for_status()?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        ensure!(
-            bytes.len() + chunk.len() <= 32 * 1024 * 1024,
-            "Catálogo de models.dev demasiado grande"
-        );
-        bytes.extend(chunk);
-    }
-    let catalog: Value = serde_json::from_slice(&bytes).context("JSON de models.dev inválido")?;
-    ensure!(
-        catalog["providers"]
-            .as_object()
-            .is_some_and(|p| !p.is_empty())
-            && catalog["models"].is_object(),
-        "models.dev debe contener los objetos providers y models"
-    );
-    Ok(catalog)
-}
-
-fn filter_models(models: Vec<Model>, catalog: &Value) -> (Vec<Model>, Vec<String>) {
-    let mut accepted = Vec::new();
-    let mut excluded = Vec::new();
-    for model in models {
-        let entry = model
-            .id
-            .split_once('/')
-            .map(|(provider, name)| &catalog["providers"][provider]["models"][name]);
-        let entry = entry.unwrap_or(&Value::Null);
-        let canonical = entry["canonical_model_id"]
-            .as_str()
-            .map(|id| &catalog["models"][id])
-            .unwrap_or(&Value::Null);
-        // Only an explicit canonical link can supply missing limits. A provider's
-        // own value always wins, including smaller or invalid values.
-        let limit = |name: &str| {
-            entry["limit"]
-                .get(name)
-                .or_else(|| canonical["limit"].get(name))
-        };
-        let context = limit("context").and_then(Value::as_u64);
-        let input = limit("input");
-        match context {
-            Some(n) if n >= 1_000_000 => match input.map(Value::as_u64) {
-                Some(None) => excluded.push(format!(
-                    "{}: límite de entrada inválido en models.dev",
-                    model.id
-                )),
-                Some(Some(n)) if n < 990_000 => excluded.push(format!(
-                    "{}: entrada máxima de {n} tokens, inferior a 990000",
-                    model.id
-                )),
-                _ => accepted.push(model),
-            },
-            Some(n) => excluded.push(format!("{}: contexto de {n} tokens", model.id)),
-            None => excluded.push(format!("{}: contexto desconocido en models.dev", model.id)),
-        }
-    }
-    (accepted, excluded)
 }
 
 fn resolve_model<'a>(model: &'a str, config: &'a Value) -> &'a str {
@@ -261,22 +191,13 @@ fn configured(
         ensure!(ids.contains(explicit), "Modelo no disponible: {explicit}");
         explicit.to_string()
     } else {
-        current
-            .or_else(|| ids.get("opencode-go/deepseek-v4.1-flash").copied())
-            .unwrap_or(&models[0].id)
-            .to_string()
+        current.unwrap_or(&models[0].id).to_string()
     };
     let old_haiku = config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
         .as_str()
         .filter(|s| ids.contains(s))
         .map(String::from);
-    let haiku = old_haiku.or_else(|| {
-        models
-            .iter()
-            .filter(|m| m.id.contains("claude-haiku"))
-            .max_by_key(|m| version_key(&m.id))
-            .map(|m| m.id.clone())
-    });
+    let haiku = old_haiku.unwrap_or_else(|| default.clone());
     config["model"] = json!(default);
     if config.get("env").is_none() {
         config["env"] = json!({});
@@ -287,8 +208,12 @@ fn configured(
         config["env"]["ANTHROPIC_AUTH_TOKEN"] = json!(key);
     }
     config["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = json!("1");
-    config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = json!("990000");
-    config["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = json!("900000");
+    for key in [
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    ] {
+        config["env"].as_object_mut().unwrap().remove(key);
+    }
     for flag in [
         "DISABLE_COMPACT",
         "DISABLE_AUTO_COMPACT",
@@ -320,20 +245,13 @@ fn configured(
             }
         }
     }
-    config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = json!(haiku.unwrap_or(default.clone()));
+    config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = json!(haiku);
     config["modelPicker"] = json!({"replaceBuiltInOptions":true,"options":models.iter().map(|m|json!({"model":m.id,"label":if m.display_name.is_empty(){&m.id}else{&m.display_name},"description":format!("{} · {}",base,m.id)})).collect::<Vec<_>>()});
     Ok(config)
 }
 
-fn version_key(id: &str) -> Vec<u64> {
-    id.split(|c: char| !c.is_ascii_digit())
-        .filter_map(|s| s.parse().ok())
-        .collect()
-}
-
 struct Report {
     count: usize,
-    excluded: Vec<String>,
     default: String,
     path: PathBuf,
     backup: Option<PathBuf>,
@@ -341,15 +259,31 @@ struct Report {
 }
 
 async fn run(args: &Args) -> Result<Report> {
-    let (base, url) = urls(&args.endpoint)?;
-    let models = fetch_models(url, args.timeout, &args.api_key).await?;
-    let contexts = fetch_contexts(&args.models_url, args.timeout).await?;
-    let (models, excluded) = filter_models(models, &contexts);
+    let (_, url) = urls(&args.endpoint)?;
+    let page = fetch_models(url, args.timeout, &args.api_key).await?;
+    let models = page.data;
+    let base = page
+        .anthropic_base_url
+        .context("La API interna no devolvió anthropic_base_url")?;
+    let parsed_base = reqwest::Url::parse(&base)?;
     ensure!(
-        !models.is_empty(),
-        "Ningún modelo tiene contexto verificado de al menos 1.000.000 tokens; no se modifica Claude Code.\n{}",
-        excluded.join("\n")
+        ["http", "https"].contains(&parsed_base.scheme())
+            && parsed_base.host_str().is_some()
+            && parsed_base.username().is_empty()
+            && parsed_base.password().is_none(),
+        "URL Anthropic inválida"
     );
+    for (name, value) in &page.env {
+        ensure!(
+            [
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+            ]
+            .contains(&name.as_str())
+                && value.parse::<u64>().is_ok_and(|n| n > 0),
+            "Ajuste de contexto de la API inválido"
+        );
+    }
     let path = match &args.settings {
         Some(path) => path.clone(),
         None => std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -400,17 +334,21 @@ async fn run(args: &Args) -> Result<Report> {
     } else {
         json!({})
     };
-    let next = configured(
+    let mut next = configured(
         previous.clone(),
         &models,
         &base,
         &args.api_key,
-        args.default_model.as_deref(),
+        args.default_model
+            .as_deref()
+            .or(page.default_model.as_deref()),
     )?;
+    for (name, value) in page.env {
+        next["env"][name] = json!(value);
+    }
     let changed = previous != next;
     let mut report = Report {
         count: models.len(),
-        excluded,
         default: next["model"].as_str().unwrap_or_default().into(),
         path: path.clone(),
         backup: None,
@@ -475,10 +413,6 @@ async fn main() {
                 report.default
             );
             println!("Configuración: {}", report.path.display());
-            println!("Contexto: 990.000 tokens; compactación automática: 900.000 tokens.");
-            for reason in &report.excluded {
-                println!("Excluido: {reason}");
-            }
             if let Some(backup) = report.backup {
                 println!("Copia de seguridad: {}", backup.display());
             }

@@ -1,31 +1,47 @@
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use clap::Parser;
 use provider::Protocol;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
+mod application;
+#[path = "adapters/catalog.rs"]
+mod catalog;
+#[cfg(test)]
+mod configuration_tests;
+mod domain;
+#[cfg(test)]
+mod legacy_tests;
+#[path = "adapters/management.rs"]
+mod management;
+#[path = "adapters/oauth.rs"]
+mod oauth;
+#[cfg(test)]
+mod protocol_tests;
+#[path = "adapters/upstream.rs"]
 mod provider;
+#[path = "adapters/anthropic.rs"]
 mod server;
+#[path = "adapters/sqlite.rs"]
+mod sqlite;
+#[path = "adapters/stream.rs"]
 mod stream;
 #[cfg(test)]
 mod tests;
+#[path = "adapters/translate.rs"]
 mod translate;
 
 struct Config {
-    host: String,
+    catalog: Option<Vec<serde_json::Value>>,
+    #[cfg(test)]
     port: u16,
     timeout: Duration,
     providers: Vec<ProviderConfig>,
     client_version: String,
     project_id: String,
     protocols: HashMap<String, Protocol>,
-    log_filter: String,
 }
-
 struct ProviderConfig {
+    opencode: bool,
     name: String,
     base: String,
     key: String,
@@ -33,144 +49,54 @@ struct ProviderConfig {
     models: Vec<String>,
 }
 
-// Read .env without mutating process-wide environment in an async runtime.
-// Explicit environment variables take precedence over the file.
-impl Config {
-    fn load(path: &Path) -> Result<Self> {
-        let mut values = HashMap::new();
-        match dotenvy::from_path_iter(path) {
-            Ok(iter) => {
-                for item in iter {
-                    let (key, value) = item?;
-                    values.insert(key, value);
-                }
-            }
-            Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).context("No se pudo leer .env"),
-        }
-        values.extend(std::env::vars());
-        Self::from_values(&values)
-    }
-
-    fn from_values(values: &HashMap<String, String>) -> Result<Self> {
-        let get =
-            |key: &str, default: &str| values.get(key).cloned().unwrap_or_else(|| default.into());
-        let enabled = |key: &str| -> Result<bool> {
-            match get(key, "false").to_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => Ok(true),
-                "false" | "0" | "no" | "off" | "" => Ok(false),
-                _ => bail!("{key} debe ser booleano"),
-            }
-        };
-        let mut providers = Vec::new();
-        for (name, flag, url_key, base, free_only) in [
-            (
-                "opencode-zen",
-                "OPENCODE_ZEN_ENABLED",
-                "OPENCODE_ZEN_BASE_URL",
-                "https://opencode.ai/zen/v1",
-                true,
-            ),
-            (
-                "opencode-go",
-                "OPENCODE_GO_ENABLED",
-                "OPENCODE_GO_BASE_URL",
-                "https://opencode.ai/zen/go/v1",
-                false,
-            ),
-            (
-                "openai",
-                "OPENAI_ENABLED",
-                "OPENAI_BASE_URL",
-                "https://api.openai.com/v1",
-                false,
-            ),
-        ] {
-            if enabled(flag)? {
-                let base = get(url_key, base).trim_end_matches('/').to_string();
-                let url = reqwest::Url::parse(&base).context("URL de proveedor inválida")?;
-                if !["http", "https"].contains(&url.scheme()) {
-                    bail!("URL de proveedor debe ser HTTP(S)");
-                }
-                providers.push(ProviderConfig {
-                    name: name.into(),
-                    base,
-                    key: get(
-                        if name == "openai" {
-                            "OPENAI_API_KEY"
-                        } else {
-                            "OPENCODE_API_KEY"
-                        },
-                        "",
-                    ),
-                    free_only,
-                    models: if name == "openai" {
-                        get("OPENAI_MODELS", "")
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    },
-                });
-            }
-        }
-        let protocols = serde_json::from_str(&get("MODEL_PROTOCOL_OVERRIDES", "{}"))
-            .context("MODEL_PROTOCOL_OVERRIDES debe mapear IDs a chat, messages o responses")?;
-        let seconds: u64 = get("REQUEST_TIMEOUT_SECONDS", "120")
-            .parse()
-            .context("Timeout inválido")?;
-        let port = get("PROXY_PORT", "10800")
-            .parse()
-            .context("PROXY_PORT inválido")?;
-        if seconds == 0 || port == 0 {
-            bail!("Puerto y timeout deben ser mayores que cero");
-        }
-        Ok(Self {
-            host: get("PROXY_HOST", "0.0.0.0"),
-            port,
-            timeout: Duration::from_secs(seconds),
-            providers,
-            client_version: get("OPENCODE_CLIENT_VERSION", "2.0.26"),
-            project_id: get("OPENCODE_PROJECT_ID", ""),
-            protocols,
-            log_filter: get("RUST_LOG", "info"),
-        })
-    }
-}
-
 #[derive(Parser)]
-#[command(version, about = "Proxy Anthropic para OpenCode y proveedores OpenAI")]
+#[command(version, about = "Proxy Anthropic configurable desde una UI web")]
 struct Args {
-    #[arg(long, default_value = ".env")]
-    env: PathBuf,
-    #[arg(long)]
-    host: Option<String>,
-    #[arg(long)]
-    port: Option<u16>,
+    #[arg(long, default_value = "claude-proxy.sqlite3")]
+    database: PathBuf,
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    #[arg(long, default_value_t = 10800)]
+    port: u16,
+    #[arg(long, default_value_t = 10801)]
+    ui_port: u16,
 }
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let mut config = Config::load(&args.env)?;
+    anyhow::ensure!(
+        args.port > 0 && args.ui_port > 0 && args.port != args.ui_port,
+        "Los dos puertos deben ser distintos y mayores que cero"
+    );
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_new(&config.log_filter)?)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
-    if let Some(host) = args.host {
-        config.host = host;
-    }
-    if let Some(port) = args.port {
-        anyhow::ensure!(port > 0, "Puerto inválido");
-        config.port = port;
-    }
-    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
-    tracing::info!(address = %listener.local_addr()?, "claude-proxy Rust iniciado");
-    axum::serve(listener, server::router(config)?)
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    let app = Arc::new(application::Application::open(
+        Arc::new(sqlite::SqliteStore::open(&args.database)?),
+        args.port,
+    )?);
+    let gateway = tokio::net::TcpListener::bind((args.host.as_str(), args.port)).await?;
+    let admin = tokio::net::TcpListener::bind((args.host.as_str(), args.ui_port)).await?;
+    tracing::info!(anthropic = %gateway.local_addr()?, ui = %admin.local_addr()?, "Proxy iniciado; configura los proveedores desde la UI");
+    let (stop, _) = tokio::sync::watch::channel(false);
+    let mut first = stop.subscribe();
+    let mut second = stop.subscribe();
+    let api =
+        axum::serve(gateway, management::gateway(app.clone())).with_graceful_shutdown(async move {
+            let _ = first.changed().await;
+        });
+    let ui = axum::serve(admin, management::router(app)).with_graceful_shutdown(async move {
+        let _ = second.changed().await;
+    });
+    let signal = async move {
+        shutdown().await;
+        let _ = stop.send(true);
+    };
+    let (a, b, _) = tokio::join!(api, ui, signal);
+    a?;
+    b?;
     Ok(())
 }
 

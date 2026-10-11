@@ -1,7 +1,6 @@
 use crate::ProviderConfig;
 use anyhow::{Context, Result};
 use reqwest::{Client, RequestBuilder, header::HeaderMap};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -11,13 +10,7 @@ use std::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    Chat,
-    Messages,
-    Responses,
-}
+pub use crate::domain::Protocol;
 
 pub fn protocol(model: &str) -> Protocol {
     let id = model.to_lowercase();
@@ -92,7 +85,7 @@ impl Provider {
             if !self.config.key.is_empty() {
                 req = req.bearer_auth(&self.config.key);
             }
-            if self.config.name.starts_with("opencode-") {
+            if self.config.opencode {
                 req = req
                     .header("user-agent", &self.user_agent)
                     .header("x-opencode-client", "cli");
@@ -132,6 +125,10 @@ impl Provider {
             Protocol::Messages => "/messages",
             Protocol::Responses => "/responses",
         };
+        self.post_path(path, protocol, headers)
+    }
+
+    pub fn post_path(&self, path: &str, protocol: Protocol, headers: &HeaderMap) -> RequestBuilder {
         let mut req = self.client.post(format!("{}{path}", self.config.base));
         // Incoming client credentials are never forwarded to a provider.
         if !self.config.key.is_empty() {
@@ -141,7 +138,7 @@ impl Provider {
                 req.bearer_auth(&self.config.key)
             };
         }
-        if self.config.name.starts_with("opencode-") {
+        if self.config.opencode {
             let session = self.session(headers);
             req = req
                 .header("user-agent", &self.user_agent)
@@ -161,6 +158,9 @@ impl Provider {
                     .and_then(|s| s.to_str().ok())
                     .unwrap_or("2023-06-01"),
             );
+            if let Some(value) = headers.get("anthropic-beta") {
+                req = req.header("anthropic-beta", value);
+            }
         }
         req
     }
