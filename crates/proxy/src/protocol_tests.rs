@@ -518,6 +518,13 @@ mod http {
         )
     }
     async fn fixture(protocol: Protocol) -> (String, Calls, Vec<tokio::task::JoinHandle<()>>) {
+        fixture_with_subscription(protocol, false).await
+    }
+
+    async fn fixture_with_subscription(
+        protocol: Protocol,
+        subscription: bool,
+    ) -> (String, Calls, Vec<tokio::task::JoinHandle<()>>) {
         let calls = Calls::default();
         let (up, up_task) = serve(
             Router::new()
@@ -546,10 +553,140 @@ mod http {
                 ("raw".into(), protocol),
                 ("fail".into(), protocol),
                 ("missing".into(), protocol),
+                ("gpt-6.1-sol".into(), protocol),
+                ("gpt-6-astra".into(), protocol),
+                ("gpt-6-luna".into(), protocol),
             ]),
         };
-        let (base, task) = serve(crate::server::router(config).unwrap()).await;
+        let subscriptions = if subscription {
+            std::collections::HashSet::from(["test".to_string()])
+        } else {
+            std::collections::HashSet::new()
+        };
+        let (base, task) =
+            serve(crate::server::router_with_subscriptions(config, subscriptions).unwrap()).await;
         (base, calls, vec![up_task, task])
+    }
+
+    #[tokio::test]
+    async fn subscription_cache_markers_use_defaults_without_changing_content_or_schemas() {
+        for subscription in [false, true] {
+            let (base, calls, tasks) =
+                fixture_with_subscription(Protocol::Responses, subscription).await;
+            for model in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"] {
+                for stream in [false, true] {
+                    let mut req = request(
+                        json!([{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]),
+                    );
+                    req["model"] = json!(format!("test/{model}"));
+                    req["stream"] = json!(stream);
+                    req["system"] = json!([{"type":"text","text":"Be concise.","cache_control":{"type":"ephemeral","ttl":"1h"}}]);
+                    req["tools"] = json!([{"name":"lookup","input_schema":{"type":"object","properties":{"prompt_cache_breakpoint":{"type":"string"}}},"cache_control":{"type":"ephemeral"}}]);
+                    let response = reqwest::Client::new()
+                        .post(format!("{base}/v1/messages"))
+                        .json(&req)
+                        .send()
+                        .await
+                        .unwrap();
+                    assert!(response.status().is_success());
+                    assert_eq!(
+                        response.headers()["x-claude-proxy-warnings"]
+                            .to_str()
+                            .unwrap()
+                            .contains("prompt_cache_uses_provider_defaults"),
+                        subscription
+                    );
+                    response.bytes().await.unwrap();
+                    let body = calls.lock().unwrap().last().unwrap().2.clone();
+                    assert_eq!(body.get("prompt_cache_options").is_none(), subscription);
+                    assert_eq!(
+                        body["input"][0]["content"][0]
+                            .get("prompt_cache_breakpoint")
+                            .is_none(),
+                        subscription
+                    );
+                    assert_eq!(
+                        body["input"][1]["content"][0]
+                            .get("prompt_cache_breakpoint")
+                            .is_none(),
+                        subscription
+                    );
+                    assert_eq!(body["input"][0]["content"][0]["text"], "Be concise.");
+                    assert_eq!(body["input"][1]["content"][0]["text"], "hello");
+                    assert_eq!(
+                        body["tools"][0]["parameters"],
+                        req["tools"][0]["input_schema"]
+                    );
+                }
+                let req = json!({"model":format!("test/{model}"),"messages":[{"role":"user","content":[{"type":"text","text":"count","cache_control":{"type":"ephemeral"}}]}]});
+                let response = reqwest::Client::new()
+                    .post(format!("{base}/v1/messages/count_tokens"))
+                    .json(&req)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+                let body = calls.lock().unwrap().last().unwrap().2.clone();
+                assert_eq!(
+                    body["input"][0]["content"][0]
+                        .get("prompt_cache_breakpoint")
+                        .is_none(),
+                    subscription
+                );
+            }
+            for task in tasks {
+                task.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_omits_safety_identifier_but_api_key_responses_keeps_it() {
+        for subscription in [false, true] {
+            let (base, calls, tasks) =
+                fixture_with_subscription(Protocol::Responses, subscription).await;
+            for stream in [false, true] {
+                let mut req = request(json!("hi"));
+                req["stream"] = json!(stream);
+                req["metadata"] = json!({"user_id":"private-user@example.com"});
+                req["tools"] =
+                    json!([{"name":"lookup","input_schema":{"type":"object","properties":{}}}]);
+                let response = reqwest::Client::new()
+                    .post(format!("{base}/v1/messages"))
+                    .json(&req)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+                let warning = response.headers()["x-claude-proxy-warnings"]
+                    .to_str()
+                    .unwrap();
+                assert_eq!(
+                    warning.contains("user_id_not_supported_by_subscription"),
+                    subscription
+                );
+                assert_eq!(warning.contains("user_id_forwarded_as_hash"), !subscription);
+                response.bytes().await.unwrap();
+                let calls = calls.lock().unwrap();
+                let body = &calls.last().unwrap().2;
+                let mut expected =
+                    crate::translate::request(&req, "raw", Protocol::Responses).unwrap();
+                if subscription {
+                    expected
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("safety_identifier");
+                }
+                assert_eq!(*body, expected);
+                if !subscription {
+                    assert_eq!(body["safety_identifier"].as_str().unwrap().len(), 64);
+                    assert_ne!(body["safety_identifier"], req["metadata"]["user_id"]);
+                }
+            }
+            for task in tasks {
+                task.abort();
+            }
+        }
     }
 
     #[tokio::test]

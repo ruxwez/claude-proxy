@@ -16,7 +16,7 @@ use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -25,9 +25,18 @@ struct Proxy {
     catalog: Option<Vec<Value>>,
     providers: Vec<Provider>,
     protocols: HashMap<String, Protocol>,
+    subscriptions: HashSet<String>,
 }
 
+#[cfg(test)]
 pub fn router(config: Config) -> Result<Router> {
+    router_with_subscriptions(config, HashSet::new())
+}
+
+pub(crate) fn router_with_subscriptions(
+    config: Config,
+    subscriptions: HashSet<String>,
+) -> Result<Router> {
     let client = reqwest::Client::builder()
         .read_timeout(config.timeout)
         .connect_timeout(Duration::from_secs(15))
@@ -61,6 +70,7 @@ pub fn router(config: Config) -> Result<Router> {
             catalog: config.catalog,
             providers,
             protocols: config.protocols,
+            subscriptions,
         })))
 }
 
@@ -259,9 +269,23 @@ async fn messages(
     let protocol = selected_protocol(&p.config.name, target, &proxy.protocols);
     let started = Instant::now();
     tracing::info!(model = id, ?protocol, "Enviando petición al proveedor");
-    let body =
+    let mut body =
         translate::request(&req, target, protocol).map_err(|e| ApiError::Invalid(e.to_string()))?;
     let mut warnings = translate::warnings(&req, target, protocol);
+    // The subscription gateway rejects this public Responses API parameter.
+    // Keep the mapping for API-key providers; subscription auth identifies its user.
+    if proxy.subscriptions.contains(&p.config.name)
+        && let Some(body) = body.as_object_mut()
+        && body.remove("safety_identifier").is_some()
+    {
+        warnings.retain(|warning| *warning != "user_id_forwarded_as_hash");
+        warnings.push("user_id_not_supported_by_subscription");
+    }
+    if proxy.subscriptions.contains(&p.config.name)
+        && translate::remove_prompt_cache_controls(&mut body)
+    {
+        warnings.push("prompt_cache_uses_provider_defaults");
+    }
     if protocol != Protocol::Messages && headers.contains_key("anthropic-beta") {
         warnings.push("anthropic_beta_not_transferable");
     }
@@ -362,6 +386,9 @@ async fn count_tokens(
         if protocol != Protocol::Chat {
             let mut body = translate::request(&req, model, protocol)
                 .map_err(|e| ApiError::Invalid(e.to_string()))?;
+            if proxy.subscriptions.contains(&provider.config.name) {
+                translate::remove_prompt_cache_controls(&mut body);
+            }
             let path = if protocol == Protocol::Messages {
                 "/messages/count_tokens"
             } else {
@@ -466,6 +493,7 @@ pub fn configured_router(settings: &crate::domain::Settings) -> Result<Router> {
     settings.validate()?;
     let mut providers = Vec::new();
     let mut protocols = HashMap::new();
+    let mut subscriptions = HashSet::new();
     for p in &settings.providers {
         if !p.enabled {
             continue;
@@ -483,6 +511,7 @@ pub fn configured_router(settings: &crate::domain::Settings) -> Result<Router> {
             continue;
         }
         let (base, key) = if p.kind == ProviderKind::Chatgpt {
+            subscriptions.insert(p.id.clone());
             (
                 "https://api.openai.com/v1".to_string(),
                 p.subscription
@@ -522,14 +551,17 @@ pub fn configured_router(settings: &crate::domain::Settings) -> Result<Router> {
             m
         })
         .collect();
-    router(Config {
-        catalog: Some(catalog),
-        #[cfg(test)]
-        port: 10800,
-        timeout: Duration::from_secs(settings.timeout_seconds),
-        providers,
-        protocols,
-        client_version: "2.0.26".into(),
-        project_id: settings.host_id.clone(),
-    })
+    router_with_subscriptions(
+        Config {
+            catalog: Some(catalog),
+            #[cfg(test)]
+            port: 10800,
+            timeout: Duration::from_secs(settings.timeout_seconds),
+            providers,
+            protocols,
+            client_version: "2.0.26".into(),
+            project_id: settings.host_id.clone(),
+        },
+        subscriptions,
+    )
 }

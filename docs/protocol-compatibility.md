@@ -74,6 +74,18 @@ Anthropic de 5 minutos/1 hora no equivale al de OpenAI de 30 minutos: se informa
 la diferencia, sin prometer igual retención, facturación o aciertos. En otros
 modelos no se envían campos de caché OpenAI específicos.
 
+ChatGPT por suscripción usa la caché automática del proveedor: se omiten
+`prompt_cache_options` y los marcadores `prompt_cache_breakpoint`, porque su
+servicio puede rechazarlos incluso con esos IDs de modelo. El aviso
+`prompt_cache_uses_provider_defaults` identifica la adaptación; no se eliminan
+texto, herramientas ni contadores de caché recibidos. OpenAI con API key conserva
+la conversión anterior. También se aplica a las entradas de `count_tokens`.
+El 2026-10-12 se reprodujo el 400 anterior y se verificó la corrección en vivo:
+`gpt-6.1-sol`, `gpt-6-astra` y `gpt-6-luna` devolvieron HTTP 200 y `OK`, con fin
+de streaming sin errores. Las peticiones incluyeron marcadores de caché en
+sistema, usuario, herramientas y resultado de herramienta, además de
+`metadata.user_id`. Pasaron 57 pruebas del proxy y 9 del CLI, formato y Clippy.
+
 El `input_tokens` de Anthropic excluye los tokens cacheados. El proxy resta los
 aciertos comunicados por el proveedor y los coloca en `cache_read_input_tokens`
 para evitar contar dos veces. Los campos `input_tokens_details` y
@@ -108,7 +120,13 @@ metadatos y evitar ejecutar JSON parcial. Cambia la latencia de entrega respecto
 al streaming fino nativo.
 
 `metadata.user_id` se reenvía como hash estable (`user` o `safety_identifier`),
-con aviso. `service_tier: auto/standard_only` se convierte a `auto/default`;
+con aviso. ChatGPT por suscripción omite `safety_identifier`, rechazado por su
+servicio, y devuelve el aviso `user_id_not_supported_by_subscription`; OpenAI
+con API key conserva el hash. La identidad de autenticación no se modifica.
+Verificado el 2026-10-12 con una petición real a `proveedor-1/gpt-6.1-sol`,
+incluyendo `metadata.user_id`: HTTP 200, texto `OK` y fin de streaming sin
+errores. La regresión comprueba JSON/SSE y que API key sigue enviando el hash.
+`service_tier: auto/standard_only` se convierte a `auto/default`;
 no garantiza equivalencia de las condiciones comerciales del proveedor.
 
 ## Diagnóstico y verificación

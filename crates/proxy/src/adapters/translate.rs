@@ -800,6 +800,30 @@ pub fn restore_tool_names(response: &mut Value, req: &Value) {
     }
 }
 
+// Remove transport cache fields without touching tool schemas or argument data.
+// Subscription gateways can use automatic caching without accepting API controls.
+pub(crate) fn remove_prompt_cache_controls(out: &mut Value) -> bool {
+    let mut removed = out
+        .as_object_mut()
+        .is_some_and(|o| o.remove("prompt_cache_options").is_some());
+    for field in ["input", "messages"] {
+        if let Some(items) = out.get_mut(field).and_then(Value::as_array_mut) {
+            for item in items {
+                for field in ["content", "output"] {
+                    if let Some(parts) = item.get_mut(field).and_then(Value::as_array_mut) {
+                        for part in parts {
+                            if let Some(part) = part.as_object_mut() {
+                                removed |= part.remove("prompt_cache_breakpoint").is_some();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    removed
+}
+
 fn cache_controls(req: &Value, model: &str, out: &mut Value) {
     // Breakpoint support is model-specific, not a property of compatible APIs.
     let explicit = reasoning_model(model).is_some()
@@ -807,23 +831,7 @@ fn cache_controls(req: &Value, model: &str, out: &mut Value) {
             .iter()
             .any(|p| model.starts_with(p));
     if !explicit {
-        fn remove(value: &mut Value) {
-            match value {
-                Value::Object(o) => {
-                    o.remove("prompt_cache_breakpoint");
-                    for v in o.values_mut() {
-                        remove(v);
-                    }
-                }
-                Value::Array(a) => {
-                    for v in a {
-                        remove(v);
-                    }
-                }
-                _ => {}
-            }
-        }
-        remove(out);
+        remove_prompt_cache_controls(out);
         return;
     }
     // Match converted content to its source to preserve cache boundaries. Tools
