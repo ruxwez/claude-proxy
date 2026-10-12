@@ -26,6 +26,8 @@ struct Proxy {
     providers: Vec<Provider>,
     protocols: HashMap<String, Protocol>,
     subscriptions: HashSet<String>,
+    traces: Option<Arc<crate::traces::Traces>>,
+    trace_policy: claude_proxy_engine::diagnostics::TracePolicy,
 }
 
 #[cfg(test)]
@@ -33,9 +35,18 @@ pub fn router(config: Config) -> Result<Router> {
     router_with_subscriptions(config, HashSet::new())
 }
 
+#[cfg(test)]
 pub(crate) fn router_with_subscriptions(
     config: Config,
     subscriptions: HashSet<String>,
+) -> Result<Router> {
+    router_with_diagnostics(config, subscriptions, None, Default::default())
+}
+fn router_with_diagnostics(
+    config: Config,
+    subscriptions: HashSet<String>,
+    traces: Option<Arc<crate::traces::Traces>>,
+    trace_policy: claude_proxy_engine::diagnostics::TracePolicy,
 ) -> Result<Router> {
     let client = reqwest::Client::builder()
         .read_timeout(config.timeout)
@@ -57,7 +68,7 @@ pub(crate) fn router_with_subscriptions(
         .map(|p| Provider::new(p, client.clone(), user_agent.clone(), project.clone()))
         .collect();
     if providers.is_empty() {
-        tracing::info!("Sin modelos activos; configura proveedores desde la UI");
+        tracing::info!("Sin modelos activos; configura proveedores desde el CLI");
     }
     Ok(Router::new()
         .route("/health", get(health))
@@ -71,6 +82,8 @@ pub(crate) fn router_with_subscriptions(
             providers,
             protocols: config.protocols,
             subscriptions,
+            traces,
+            trace_policy,
         })))
 }
 
@@ -256,6 +269,14 @@ async fn messages(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(req) = payload?;
+    let capture = proxy
+        .traces
+        .as_ref()
+        .and_then(|t| t.start(&proxy.trace_policy));
+    if let Some(trace) = &capture {
+        trace.stage("client_request", &req);
+        trace.finish("invalid_request");
+    }
     let id = req["model"].as_str().unwrap_or_default().trim();
     if id.is_empty()
         || req["max_tokens"].as_u64().unwrap_or(0) == 0
@@ -267,30 +288,27 @@ async fn messages(
     }
     let (p, target) = find_provider(&proxy, id)?;
     let protocol = selected_protocol(&p.config.name, target, &proxy.protocols);
+    if let Some(trace) = &capture {
+        trace.route(id, protocol);
+    }
     let started = Instant::now();
     tracing::info!(model = id, ?protocol, "Enviando petición al proveedor");
     let mut body =
         translate::request(&req, target, protocol).map_err(|e| ApiError::Invalid(e.to_string()))?;
     let mut warnings = translate::warnings(&req, target, protocol);
-    // The subscription gateway rejects this public Responses API parameter.
-    // Keep the mapping for API-key providers; subscription auth identifies its user.
-    if proxy.subscriptions.contains(&p.config.name)
-        && let Some(body) = body.as_object_mut()
-        && body.remove("safety_identifier").is_some()
-    {
-        warnings.retain(|warning| *warning != "user_id_forwarded_as_hash");
-        warnings.push("user_id_not_supported_by_subscription");
-    }
-    if proxy.subscriptions.contains(&p.config.name)
-        && translate::remove_prompt_cache_controls(&mut body)
-    {
-        warnings.push("prompt_cache_uses_provider_defaults");
+    if proxy.subscriptions.contains(&p.config.name) {
+        translate::adapt_subscription_request(&mut body, &mut warnings);
     }
     if protocol != Protocol::Messages && headers.contains_key("anthropic-beta") {
         warnings.push("anthropic_beta_not_transferable");
     }
     if !warnings.is_empty() {
         tracing::warn!(model = id, ?warnings, "Adaptaciones de protocolo");
+    }
+    if let Some(trace) = &capture {
+        trace.stage("upstream_request", &body);
+        trace.warnings(&warnings);
+        trace.finish("transport_error");
     }
     let upstream = p
         .post(protocol, &headers)
@@ -299,12 +317,19 @@ async fn messages(
         .await
         .context("Proveedor no alcanzable")?;
     tracing::info!(model = id, status = %upstream.status(), elapsed_ms = started.elapsed().as_millis(), "Cabeceras del proveedor recibidas");
+    if let Some(trace) = &capture {
+        trace.transport(upstream.status().as_u16(), started.elapsed().as_millis());
+    }
     if !upstream.status().is_success() {
         let status = upstream.status();
         let transport = forward_headers(upstream.headers());
         let retry_after = upstream.headers().get(RETRY_AFTER).cloned();
         let bytes = read_limited(upstream, 1024 * 1024).await?;
         let raw = serde_json::from_slice::<Value>(&bytes).ok();
+        if let Some(trace) = &capture {
+            trace.stage("upstream_response", raw.as_ref().unwrap_or(&Value::Null));
+            trace.finish("upstream_error");
+        }
         if protocol == Protocol::Messages
             && let Some(value) = raw.as_ref().filter(|v| v["type"] == "error")
         {
@@ -325,17 +350,34 @@ async fn messages(
     }
     let upstream_headers = upstream.headers().clone();
     let mut response = if req["stream"].as_bool().unwrap_or(false) {
-        stream::response(upstream, protocol, id.to_string(), &req)
+        stream::response_traced(upstream, protocol, id.to_string(), &req, capture.clone())
     } else {
         let raw: Value = serde_json::from_slice(&read_limited(upstream, 32 * 1024 * 1024).await?)
             .context("JSON del proveedor inválido")?;
+        if let Some(trace) = &capture {
+            trace.stage("upstream_response", &raw);
+            trace.finish("conversion_error");
+        }
         let mut converted = translate::response(&raw, id, protocol)?;
         if protocol != Protocol::Messages {
             translate::restore_tool_names(&mut converted, &req);
             translate::apply_stops(&mut converted, &req)?;
         }
+        if let Some(trace) = &capture {
+            trace.comparison(&claude_proxy_engine::diagnostics::compare_response(
+                &raw, &converted, &req, protocol,
+            ));
+            trace.stage("client_response", &converted);
+            trace.finish("completed");
+        }
         Json(converted).into_response()
     };
+    if let Some(trace) = &capture {
+        response.headers_mut().insert(
+            "x-claude-proxy-trace-id",
+            HeaderValue::from_str(&trace.id()).unwrap(),
+        );
+    }
     response
         .headers_mut()
         .extend(forward_headers(&upstream_headers));
@@ -384,44 +426,18 @@ async fn count_tokens(
         let (provider, model) = find_provider(&proxy, id)?;
         let protocol = selected_protocol(&provider.config.name, model, &proxy.protocols);
         if protocol != Protocol::Chat {
-            let mut body = translate::request(&req, model, protocol)
-                .map_err(|e| ApiError::Invalid(e.to_string()))?;
-            if proxy.subscriptions.contains(&provider.config.name) {
-                translate::remove_prompt_cache_controls(&mut body);
-            }
+            let body = translate::count_request(
+                &req,
+                model,
+                protocol,
+                proxy.subscriptions.contains(&provider.config.name),
+            )
+            .map_err(|e| ApiError::Invalid(e.to_string()))?;
             let path = if protocol == Protocol::Messages {
                 "/messages/count_tokens"
             } else {
                 "/responses/input_tokens"
             };
-            if protocol == Protocol::Responses {
-                body.as_object_mut().unwrap().retain(|key, _| {
-                    matches!(
-                        key.as_str(),
-                        "model"
-                            | "input"
-                            | "tools"
-                            | "tool_choice"
-                            | "text"
-                            | "reasoning"
-                            | "parallel_tool_calls"
-                    )
-                });
-            } else {
-                body.as_object_mut().unwrap().retain(|key, _| {
-                    matches!(
-                        key.as_str(),
-                        "model"
-                            | "messages"
-                            | "system"
-                            | "tools"
-                            | "tool_choice"
-                            | "thinking"
-                            | "context_management"
-                            | "output_config"
-                    )
-                });
-            }
             let upstream = provider
                 .post_path(path, protocol, &headers)
                 .json(&body)
@@ -473,23 +489,16 @@ async fn count_tokens(
 }
 
 fn estimated_count(req: &Value) -> Response {
-    let size = text_size(&req["system"]) + text_size(&req["messages"]) + text_size(&req["tools"]);
     (
         [("x-claude-proxy-token-count", "estimated")],
-        Json(json!({"input_tokens":size.div_ceil(4).max(1)})),
+        Json(json!({"input_tokens":translate::estimated_tokens(req)})),
     )
         .into_response()
 }
-fn text_size(v: &Value) -> usize {
-    match v {
-        Value::String(s) => s.chars().count(),
-        Value::Array(a) => a.iter().map(text_size).sum(),
-        Value::Object(o) => o.values().map(text_size).sum(),
-        _ => 0,
-    }
-}
-
-pub fn configured_router(settings: &crate::domain::Settings) -> Result<Router> {
+pub fn configured_router_with_traces(
+    settings: &crate::domain::Settings,
+    traces: Option<Arc<crate::traces::Traces>>,
+) -> Result<Router> {
     settings.validate()?;
     let mut providers = Vec::new();
     let mut protocols = HashMap::new();
@@ -551,7 +560,7 @@ pub fn configured_router(settings: &crate::domain::Settings) -> Result<Router> {
             m
         })
         .collect();
-    router_with_subscriptions(
+    router_with_diagnostics(
         Config {
             catalog: Some(catalog),
             #[cfg(test)]
@@ -563,5 +572,7 @@ pub fn configured_router(settings: &crate::domain::Settings) -> Result<Router> {
             project_id: settings.host_id.clone(),
         },
         subscriptions,
+        traces,
+        settings.traces.clone(),
     )
 }

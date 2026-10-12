@@ -6,7 +6,7 @@ services:
     image: claude-proxy:rust
     container_name: claude-proxy
     restart: unless-stopped
-    command: ["--host", "0.0.0.0", "--database", "/data/proxy.sqlite3"]
+    command: ["--host", "0.0.0.0", "--config-dir", "/data"]
     ports:
       - "127.0.0.1:10800:10800"
       - "127.0.0.1:10801:10801"

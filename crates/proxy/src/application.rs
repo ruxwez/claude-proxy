@@ -6,7 +6,7 @@ use std::{
 };
 
 pub struct Application {
-    store: Arc<dyn SettingsStore>,
+    store: RwLock<Arc<dyn SettingsStore>>,
     state: RwLock<(Settings, u64)>,
     pub mutation: tokio::sync::Mutex<()>,
     pub pending: tokio::sync::Mutex<HashMap<String, crate::domain::AuthorizationAttempt>>,
@@ -21,12 +21,21 @@ impl Application {
             store.save(&settings)?;
         }
         Ok(Self {
-            store,
+            store: RwLock::new(store),
             state: RwLock::new((settings, 0)),
             mutation: tokio::sync::Mutex::new(()),
             pending: tokio::sync::Mutex::new(HashMap::new()),
             port,
         })
+    }
+    // Infrastructure adapters serialize replacement with the same mutation lock.
+    pub fn install_store(&self, store: Arc<dyn SettingsStore>, settings: Settings) -> Result<()> {
+        validate(&settings)?;
+        *self.store.write().unwrap() = store;
+        let mut state = self.state.write().unwrap();
+        state.1 += 1;
+        state.0 = settings;
+        Ok(())
     }
     pub fn settings(&self) -> Settings {
         self.state.read().unwrap().0.clone()
@@ -35,9 +44,11 @@ impl Application {
         self.state.read().unwrap().clone()
     }
     // Callers serialize mutations, including OAuth rotation, with `mutation`.
-    pub fn save(&self, settings: Settings) -> Result<()> {
+    pub async fn save(&self, settings: Settings) -> Result<()> {
         validate(&settings)?;
-        self.store.save(&settings)?;
+        let store = self.store.read().unwrap().clone();
+        let persisted = settings.clone();
+        tokio::task::spawn_blocking(move || store.save(&persisted)).await??;
         let mut state = self.state.write().unwrap();
         let revision = state.1 + 1;
         *state = (settings, revision);
@@ -62,7 +73,7 @@ impl Application {
                 p.subscription = None;
             }
         }
-        self.save(settings)
+        self.save(settings).await
     }
 }
 pub(crate) fn validate_url(base: &str) -> Result<()> {
@@ -78,7 +89,7 @@ pub(crate) fn validate_url(base: &str) -> Result<()> {
     );
     Ok(())
 }
-fn validate(settings: &Settings) -> Result<()> {
+pub(crate) fn validate(settings: &Settings) -> Result<()> {
     settings.validate()?;
     if let Some(url) = &settings.public_url {
         validate_url(url)?;

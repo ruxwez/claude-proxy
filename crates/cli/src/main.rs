@@ -10,13 +10,22 @@ use std::{
     time::Duration,
 };
 
+mod control;
+mod tui;
+
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Sincroniza los modelos de un proxy Anthropic con Claude Code"
-)]
+#[command(version, about = "Panel de control Claude Proxy")]
+struct Launch {
+    #[command(flatten)]
+    args: Args,
+    /// Sincronizar Claude Code sin abrir el panel
+    #[arg(long)]
+    sync: bool,
+}
+
+#[derive(Clone, clap::Args)]
 struct Args {
-    /// URL de la UI/API interna, o URL completa de /api/cli-config
+    /// URL de la API REST, o URL completa de /api/cli-config
     #[arg(
         long,
         env = "CLAUDE_PROXY_URL",
@@ -314,7 +323,7 @@ async fn run(args: &Args) -> Result<Report> {
             .write(true)
             .open(lock_path)?;
         lock.try_lock()
-            .context("Otro claude-update-models está actualizando este archivo")?;
+            .context("Otro claude-proxy está actualizando este archivo")?;
         Some(lock)
     };
     if let Ok(metadata) = fs::symlink_metadata(&path) {
@@ -397,7 +406,27 @@ async fn run(args: &Args) -> Result<Report> {
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let launch = Launch::parse();
+    let mut args = launch.args;
+    if !launch.sync && !args.dry_run {
+        let result = async {
+            let client = control::connect(&args.endpoint).await?;
+            tui::run(client, &args).await
+        }
+        .await;
+        if let Err(error) = result {
+            eprintln!("Error: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    match control::connect(&args.endpoint).await {
+        Ok(client) => args.endpoint = client.endpoint,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            std::process::exit(1);
+        }
+    }
     match run(&args).await {
         Ok(report) => {
             println!(

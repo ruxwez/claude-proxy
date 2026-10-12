@@ -5,12 +5,45 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
+
+// Composition belongs to the driving adapter, not the application or domain.
+pub struct Control {
+    pub application: Arc<Application>,
+    pub allowed_hosts: Vec<String>,
+    pub traces: Option<Arc<crate::traces::Traces>>,
+    pub bootstrap: Option<std::path::PathBuf>,
+    pub configured: std::sync::atomic::AtomicBool,
+}
+impl std::ops::Deref for Control {
+    type Target = Arc<Application>;
+    fn deref(&self) -> &Self::Target {
+        &self.application
+    }
+}
+#[cfg(test)]
+fn control(application: Arc<Application>) -> Arc<Control> {
+    Arc::new(Control {
+        application,
+        allowed_hosts: vec![],
+        traces: None,
+        bootstrap: None,
+        configured: std::sync::atomic::AtomicBool::new(true),
+    })
+}
+#[cfg(test)]
+pub fn router(app: Arc<Application>) -> Router {
+    router_with_control(control(app))
+}
+#[cfg(test)]
+pub fn gateway(app: Arc<Application>) -> Router {
+    gateway_with_control(control(app))
+}
 
 type Failure = (StatusCode, Json<Value>);
 fn failure(error: impl std::fmt::Display) -> Failure {
@@ -19,30 +52,12 @@ fn failure(error: impl std::fmt::Display) -> Failure {
         Json(json!({"error":error.to_string()})),
     )
 }
-pub fn router(app: Arc<Application>) -> Router {
+pub fn router_with_control(app: Arc<Control>) -> Router {
     Router::new()
-        .route("/", get(ui))
-        .route("/providers", get(ui))
-        .route("/providers/{id}", get(ui))
-        .route("/settings", get(ui))
-        .route(
-            "/assets/app.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../web/dist/assets/app.js"),
-                )
-            }),
-        )
-        .route(
-            "/assets/style.css",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("../web/dist/assets/style.css"),
-                )
-            }),
-        )
+        .route("/api/status", get(status))
+        .route("/api/setup", post(setup))
+        .route("/api/traces", get(list_traces).delete(clear_traces))
+        .route("/api/traces/{id}", get(trace_detail))
         .route("/api/settings", get(settings).put(save))
         .route("/api/cli-config", get(cli_config))
         .route("/api/providers/catalog", post(provider_catalog))
@@ -54,16 +69,12 @@ pub fn router(app: Arc<Application>) -> Router {
         .route("/api/providers/{id}/api-key", delete(clear_key))
         .route("/auth/callback", get(callback))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
-        .layer(middleware::from_fn(protect))
+        .layer(middleware::from_fn_with_state(app.clone(), protect))
         .with_state(app)
 }
 
-async fn ui() -> Html<&'static str> {
-    Html(include_str!("../web/dist/index.html"))
-}
-
 // Local admin has no login prompt. Reject foreign browser origins and DNS rebinding.
-async fn protect(request: Request, next: Next) -> Response {
+async fn protect(State(app): State<Arc<Control>>, request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get(header::HOST)
@@ -76,6 +87,10 @@ async fn protect(request: Request, next: Next) -> Response {
         .and_then(|u| u.host_str())
         .is_some_and(|h| {
             h == "localhost"
+                || app
+                    .allowed_hosts
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(h))
                 || h.trim_matches(['[', ']'])
                     .parse::<std::net::IpAddr>()
                     .is_ok()
@@ -116,7 +131,88 @@ async fn protect(request: Request, next: Next) -> Response {
         .insert("referrer-policy", "no-referrer".parse().unwrap());
     response
 }
-async fn settings(State(app): State<Arc<Application>>) -> Json<Value> {
+async fn status(State(app): State<Arc<Control>>) -> Json<Value> {
+    Json(
+        json!({"service":"claude-proxy","version":env!("CARGO_PKG_VERSION"),"configured":app.configured.load(std::sync::atomic::Ordering::Acquire),"anthropic_port":app.port}),
+    )
+}
+async fn setup(
+    State(app): State<Arc<Control>>,
+    Json(database): Json<crate::database::Database>,
+) -> Result<Json<Value>, Failure> {
+    let _guard = app.mutation.lock().await;
+    if app.configured.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(failure("El servidor ya está configurado"));
+    }
+    let path = app
+        .bootstrap
+        .clone()
+        .ok_or_else(|| failure("Servidor sin bootstrap"))?;
+    let mut database = database;
+    if let crate::database::Database::Sqlite { path: sqlite } = &mut database
+        && sqlite.as_os_str().is_empty()
+    {
+        *sqlite = path.parent().unwrap().join("proxy.sqlite3");
+    }
+    let previous = app.settings();
+    let (store, settings) = tokio::task::spawn_blocking(move || {
+        let store = database.open()?;
+        let mut settings = store.load()?;
+        settings.separate_chatgpt();
+        if settings.providers.is_empty() {
+            settings = previous;
+        }
+        crate::application::validate(&settings)?;
+        store.save(&settings)?;
+        database.save(&path)?;
+        anyhow::Ok((store, settings))
+    })
+    .await
+    .map_err(failure)?
+    .map_err(failure)?;
+    app.install_store(store, settings).map_err(failure)?;
+    app.configured
+        .store(true, std::sync::atomic::Ordering::Release);
+    Ok(Json(json!({"configured":true})))
+}
+#[derive(serde::Deserialize)]
+struct TraceQuery {
+    after: Option<String>,
+}
+async fn list_traces(
+    State(app): State<Arc<Control>>,
+    Query(query): Query<TraceQuery>,
+) -> Result<Json<Value>, Failure> {
+    let traces = app
+        .traces
+        .clone()
+        .ok_or_else(|| failure("Trazas no disponibles"))?;
+    tokio::task::spawn_blocking(move || traces.page(query.after.as_deref()))
+        .await
+        .map_err(failure)?
+        .map(Json)
+        .map_err(failure)
+}
+async fn trace_detail(
+    State(app): State<Arc<Control>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Failure> {
+    app.traces
+        .as_ref()
+        .ok_or_else(|| failure("Trazas no disponibles"))?
+        .list(Some(&id))
+        .map(Json)
+        .map_err(failure)
+}
+async fn clear_traces(State(app): State<Arc<Control>>) -> Result<Json<Value>, Failure> {
+    app.traces
+        .as_ref()
+        .ok_or_else(|| failure("Trazas no disponibles"))?
+        .clear()
+        .map_err(failure)?;
+    Ok(Json(json!({"cleared":true})))
+}
+async fn settings(State(app): State<Arc<Control>>) -> Json<Value> {
     let settings = app.settings();
     let mut value = serde_json::to_value(&settings).unwrap();
     for (p, stored) in value["providers"]
@@ -134,7 +230,7 @@ async fn settings(State(app): State<Arc<Application>>) -> Json<Value> {
     Json(value)
 }
 async fn save(
-    State(app): State<Arc<Application>>,
+    State(app): State<Arc<Control>>,
     Json(settings): Json<Settings>,
 ) -> Result<Json<Value>, Failure> {
     app.replace(settings).await.map_err(failure)?;
@@ -148,7 +244,7 @@ struct CatalogRequest {
     refresh: bool,
 }
 async fn provider_catalog(
-    State(app): State<Arc<Application>>,
+    State(app): State<Arc<Control>>,
     Json(mut request): Json<CatalogRequest>,
 ) -> Result<Json<Value>, Failure> {
     crate::application::validate_url(&request.provider.base_url).map_err(failure)?;
@@ -192,7 +288,7 @@ async fn metadata_providers() -> Result<Json<Value>, Failure> {
     providers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     Ok(Json(json!({"data":providers})))
 }
-async fn cli_config(State(app): State<Arc<Application>>, headers: HeaderMap) -> Json<Value> {
+async fn cli_config(State(app): State<Arc<Control>>, headers: HeaderMap) -> Json<Value> {
     let settings = app.settings();
     let mut base = reqwest::Url::parse(&format!(
         "http://{}",
@@ -219,7 +315,7 @@ async fn cli_config(State(app): State<Arc<Application>>, headers: HeaderMap) -> 
     )
 }
 async fn start_oauth(
-    State(app): State<Arc<Application>>,
+    State(app): State<Arc<Control>>,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, Failure> {
@@ -230,25 +326,25 @@ async fn start_oauth(
     let port = reqwest::Url::parse(&format!("http://{host}"))
         .ok()
         .and_then(|u| u.port())
-        .ok_or_else(|| failure("No se pudo determinar el puerto de la UI"))?;
+        .ok_or_else(|| failure("No se pudo determinar el puerto de el CLI"))?;
     let url = oauth::start(&app, &id, port).await.map_err(failure)?;
     Ok(Json(json!({"url":url})))
 }
 async fn callback(
-    State(app): State<Arc<Application>>,
+    State(app): State<Arc<Control>>,
     Query(query): Query<oauth::Callback>,
 ) -> Response {
     match oauth::complete(&app, query).await {
-        Ok(()) => axum::response::Redirect::to("/?connected=1").into_response(),
+        Ok(()) => "Conexión completada. Vuelve al CLI y actualiza el panel.".into_response(),
         Err(error) => (
             StatusCode::BAD_REQUEST,
-            format!("No se pudo conectar OpenAI: {error}. Vuelve a la UI e inténtalo de nuevo."),
+            format!("No se pudo conectar OpenAI: {error}. Vuelve a el CLI e inténtalo de nuevo."),
         )
             .into_response(),
     }
 }
 async fn disconnect(
-    State(app): State<Arc<Application>>,
+    State(app): State<Arc<Control>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Failure> {
     let _guard = app.mutation.lock().await;
@@ -297,11 +393,11 @@ async fn disconnect(
         revoked = result.is_ok();
     }
     p.subscription = None;
-    app.save(settings).map_err(failure)?;
+    app.save(settings).await.map_err(failure)?;
     Ok(Json(json!({"disconnected":true,"remote_revoked":revoked})))
 }
 async fn clear_key(
-    State(app): State<Arc<Application>>,
+    State(app): State<Arc<Control>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Failure> {
     let _guard = app.mutation.lock().await;
@@ -312,15 +408,15 @@ async fn clear_key(
         .find(|p| p.id == id)
         .ok_or_else(|| failure("Proveedor no encontrado"))?
         .api_key = None;
-    app.save(settings).map_err(failure)?;
+    app.save(settings).await.map_err(failure)?;
     Ok(Json(json!({"cleared":true})))
 }
 
 struct Gateway {
-    app: Arc<Application>,
+    app: Arc<Control>,
     route: std::sync::Mutex<Option<(u64, Router)>>,
 }
-pub fn gateway(app: Arc<Application>) -> Router {
+pub fn gateway_with_control(app: Arc<Control>) -> Router {
     Router::new()
         .fallback(dispatch)
         .with_state(Arc::new(Gateway {
@@ -351,10 +447,11 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, mut request: Request) -> 
         let mut cached = gateway.route.lock().unwrap();
         let (settings, revision) = app.snapshot();
         if cached.as_ref().is_none_or(|(old, _)| *old != revision) {
-            let router = match crate::server::configured_router(&settings) {
-                Ok(router) => router,
-                Err(error) => return failure(error).into_response(),
-            };
+            let router =
+                match crate::server::configured_router_with_traces(&settings, app.traces.clone()) {
+                    Ok(router) => router,
+                    Err(error) => return failure(error).into_response(),
+                };
             *cached = Some((revision, router));
         }
         cached.as_ref().unwrap().1.clone()

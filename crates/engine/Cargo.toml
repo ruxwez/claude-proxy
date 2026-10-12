@@ -1,0 +1,13 @@
+[package]
+name = "claude-proxy-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+sha2 = "0.10"
+uuid.workspace = true

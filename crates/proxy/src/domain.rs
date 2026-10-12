@@ -2,13 +2,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    Chat,
-    Messages,
-    Responses,
-}
+pub use claude_proxy_engine::Protocol;
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -82,10 +76,12 @@ pub struct Settings {
     pub public_url: Option<String>,
     pub timeout_seconds: u64,
     pub host_id: String,
+    pub traces: claude_proxy_engine::diagnostics::TracePolicy,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            traces: Default::default(),
             providers: vec![],
             default_model: None,
             context_tokens: Some(990_000),
@@ -98,6 +94,11 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        self.traces.validate(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+        )?;
         ensure!(
             (1..=3600).contains(&self.timeout_seconds),
             "Timeout entre 1 y 3600 segundos"

@@ -212,7 +212,7 @@ pub async fn complete(app: &Application, callback: Callback) -> Result<()> {
         id_token,
         expires_at: now() + tokens.expires_in,
     });
-    app.save(settings)
+    app.save(settings).await
 }
 
 pub async fn refresh(app: &Application, model: &str) -> Result<()> {
@@ -287,7 +287,7 @@ async fn refresh_selected(app: &Application, id: &str, model_id: Option<&str>) -
         .await?;
     ensure!(
         response.status().is_success(),
-        "No se pudo renovar la suscripción ({}); vuelve a conectar desde la UI",
+        "No se pudo renovar la suscripción ({}); vuelve a conectar desde el CLI",
         response.status()
     );
     let tokens: Tokens = response.json().await?;
@@ -313,5 +313,5 @@ async fn refresh_selected(app: &Application, id: &str, model_id: Option<&str>) -
     if let Some(id_token) = tokens.id_token {
         subscription.id_token = id_token;
     }
-    app.save(settings)
+    app.save(settings).await
 }

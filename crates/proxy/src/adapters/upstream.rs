@@ -12,29 +12,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub use crate::domain::Protocol;
 
-pub fn protocol(model: &str) -> Protocol {
-    let id = model.to_lowercase();
-    if id.contains("muse-spark")
-        || ["grok-4.6", "grok-4.7", "gpt-6-luna", "gpt-5.6-luna"]
-            .iter()
-            .any(|p| id.starts_with(p))
-    {
-        Protocol::Responses
-    } else if [
-        "claude-haiku-5-5",
-        "minimax-m",
-        "qwen3.7-plus",
-        "qwen3.8-max",
-        "qwen3.8-flash",
-    ]
-    .iter()
-    .any(|p| id.starts_with(p))
-    {
-        Protocol::Messages
-    } else {
-        Protocol::Chat
-    }
-}
+pub use claude_proxy_engine::protocol_for_model as protocol;
 
 pub struct Provider {
     pub config: ProviderConfig,

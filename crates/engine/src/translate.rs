@@ -1,4 +1,4 @@
-use crate::provider::Protocol;
+use crate::Protocol;
 use anyhow::{Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -16,7 +16,7 @@ const STATE_PREFIX: &str = "claude-proxy-state-v1:";
 // Leave room for base64 and the SSE wrapper within the 4 MiB frame limit.
 const MAX_STATE_BYTES: usize = 3 * 1024 * 1024 - 4096;
 
-pub(crate) fn state_block(model: &str, kind: &str, value: &Value) -> Result<Value> {
+pub fn state_block(model: &str, kind: &str, value: &Value) -> Result<Value> {
     let bytes = serde_json::to_vec(&json!({"model":model,"kind":kind,"value":value}))?;
     ensure!(
         bytes.len() <= MAX_STATE_BYTES,
@@ -97,7 +97,7 @@ pub(crate) fn deepseek(model: &str) -> bool {
         || model.starts_with("deepseek-v4.")
 }
 
-pub(crate) fn responses_state(model: &str, item: &Value) -> Result<Option<Value>> {
+pub fn responses_state(model: &str, item: &Value) -> Result<Option<Value>> {
     if item["type"] != "reasoning"
         || !item["encrypted_content"]
             .as_str()
@@ -306,7 +306,7 @@ fn reasoning(req: &Value, model: &str, protocol: Protocol, out: &mut Value) -> R
             || !responses_tools
             || !has_tools
             || (supports_none && effort == Some("none")),
-        "{model} requiere el protocolo Responses para herramientas con razonamiento; selecciona Responses para este modelo en la UI"
+        "{model} requiere el protocolo Responses para herramientas con razonamiento; selecciona Responses para este modelo en el CLI"
     );
     if let Some(effort) = effort {
         if protocol == Protocol::Responses {
@@ -802,7 +802,7 @@ pub fn restore_tool_names(response: &mut Value, req: &Value) {
 
 // Remove transport cache fields without touching tool schemas or argument data.
 // Subscription gateways can use automatic caching without accepting API controls.
-pub(crate) fn remove_prompt_cache_controls(out: &mut Value) -> bool {
+pub fn remove_prompt_cache_controls(out: &mut Value) -> bool {
     let mut removed = out
         .as_object_mut()
         .is_some_and(|o| o.remove("prompt_cache_options").is_some());
@@ -1186,4 +1186,73 @@ fn tool_block(id: &str, name: &str, arguments: &Value) -> Result<Value> {
         "Herramienta sin ID o nombre"
     );
     Ok(json!({"type":"tool_use","id":id,"name":name,"input":parse_arguments(arguments)?}))
+}
+
+/// Apply the subscription gateway's semantic restrictions outside network code.
+pub fn adapt_subscription_request(body: &mut Value, warnings: &mut Vec<&'static str>) {
+    if body
+        .as_object_mut()
+        .is_some_and(|body| body.remove("safety_identifier").is_some())
+    {
+        warnings.retain(|warning| *warning != "user_id_forwarded_as_hash");
+        warnings.push("user_id_not_supported_by_subscription");
+    }
+    if remove_prompt_cache_controls(body) {
+        warnings.push("prompt_cache_uses_provider_defaults");
+    }
+}
+
+pub fn count_request(
+    req: &Value,
+    model: &str,
+    protocol: Protocol,
+    subscription: bool,
+) -> Result<Value> {
+    let mut body = request(req, model, protocol)?;
+    if subscription {
+        remove_prompt_cache_controls(&mut body);
+    }
+    body.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Petición no válida"))?
+        .retain(|key, _| {
+            if protocol == Protocol::Responses {
+                matches!(
+                    key.as_str(),
+                    "model"
+                        | "input"
+                        | "tools"
+                        | "tool_choice"
+                        | "text"
+                        | "reasoning"
+                        | "parallel_tool_calls"
+                )
+            } else {
+                matches!(
+                    key.as_str(),
+                    "model"
+                        | "messages"
+                        | "system"
+                        | "tools"
+                        | "tool_choice"
+                        | "thinking"
+                        | "context_management"
+                        | "output_config"
+                )
+            }
+        });
+    Ok(body)
+}
+
+pub fn estimated_tokens(req: &Value) -> usize {
+    fn size(v: &Value) -> usize {
+        match v {
+            Value::String(s) => s.chars().count(),
+            Value::Array(a) => a.iter().map(size).sum(),
+            Value::Object(o) => o.values().map(size).sum(),
+            _ => 0,
+        }
+    }
+    (size(&req["system"]) + size(&req["messages"]) + size(&req["tools"]))
+        .div_ceil(4)
+        .max(1)
 }

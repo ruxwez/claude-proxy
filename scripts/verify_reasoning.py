@@ -231,14 +231,14 @@ def main():
     # Read one consistent configuration snapshot; never print credentials.
     database = Path(args.database).resolve()
     if not database.is_file():
-        parser.error("Configure the proxy in the web UI before running this check")
+        parser.error("Configure the proxy in the CLI before running this check")
     with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
         settings = json.loads(connection.execute("SELECT document FROM settings WHERE id=1").fetchone()[0])
     provider_id, _, model_id = args.model.partition("/")
     provider = next((p for p in settings["providers"] if p["id"] == provider_id and p.get("enabled", True)), None)
     model = next((m for m in provider["models"] if m["id"] == model_id and m.get("enabled", True)), None) if provider else None
     if not model:
-        parser.error("Model must be configured and enabled in the web UI")
+        parser.error("Model must be configured and enabled in the CLI")
     if model.get("credential", "api_key") != "api_key":
         parser.error("Live relay supports API-key models only; subscription requests use the official endpoint")
     relay = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Relay)
@@ -264,7 +264,7 @@ def main():
         if os.name != "nt":
             isolated_db.chmod(0o600)
         log = open(Path(directory) / "proxy.log", "w", encoding="utf-8")
-        proxy = subprocess.Popen([str(ROOT / "target/debug" / ("claude-proxy.exe" if os.name == "nt" else "claude-proxy")), "--database", str(isolated_db), "--ui-port", str(ui_port), "--host", "127.0.0.1", "--port", str(port)], cwd=ROOT, env=environment, stdout=log, stderr=log)
+        proxy = subprocess.Popen([str(ROOT / "target/debug" / ("claude-proxy-server.exe" if os.name == "nt" else "claude-proxy-server")), "--database", str(isolated_db), "--admin-port", str(ui_port), "--host", "127.0.0.1", "--port", str(port)], cwd=ROOT, env=environment, stdout=log, stderr=log)
         report = {"model": args.model, "mode": args.mode, "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         try:
             for _ in range(100):

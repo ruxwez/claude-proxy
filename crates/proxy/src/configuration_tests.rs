@@ -42,22 +42,21 @@ async fn sqlite_configuration_is_live_durable_redacted_and_enforced() {
     let (ui, ui_task) = serve(management::router(app.clone())).await;
     let (gateway, gateway_task) = serve(management::gateway(app.clone())).await;
     let http = reqwest::Client::new();
-    for path in ["/providers", "/providers/custom", "/settings"] {
-        let response = http.get(format!("{ui}{path}")).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.text().await.unwrap().contains("/assets/app.js"));
-    }
-    for (path, content_type) in [
-        ("/assets/app.js", "text/javascript"),
-        ("/assets/style.css", "text/css"),
+    for path in [
+        "/",
+        "/providers",
+        "/providers/custom",
+        "/settings",
+        "/assets/app.js",
+        "/assets/style.css",
     ] {
-        let response = http.get(format!("{ui}{path}")).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            response.headers()["content-type"]
-                .to_str()
+        assert_eq!(
+            http.get(format!("{ui}{path}"))
+                .send()
+                .await
                 .unwrap()
-                .starts_with(content_type)
+                .status(),
+            StatusCode::NOT_FOUND
         );
     }
     let preferences: Value = http
@@ -75,16 +74,6 @@ async fn sqlite_configuration_is_live_durable_redacted_and_enforced() {
     assert_eq!(
         preferences["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
         "900000"
-    );
-    assert!(
-        http.get(format!("{ui}/"))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
-            .contains("Proveedores y modelos")
     );
     assert_eq!(
         http.get(format!("{gateway}/api/settings"))

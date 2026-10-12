@@ -1,11 +1,19 @@
 [package]
-name = "claude-update-models"
+name = "cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "claude-proxy"
+path = "src/main.rs"
+
 [dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+directories = "6"
+webbrowser = "1"
 anyhow.workspace = true
 clap.workspace = true
 reqwest.workspace = true
