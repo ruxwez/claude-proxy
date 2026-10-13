@@ -42,28 +42,34 @@ impl Panel {
         );
         let mut state = ListState::default().with_selected(Some(self.tab));
         frame.render_stateful_widget(
-            List::new(["Proveedores", "Modelos", "Preferencias", "Trazas"])
-                .block(panel_block(
-                    if self.sidebar {
-                        "Menú · ↑↓ Enter"
-                    } else {
-                        "Menú · Esc volver"
-                    },
-                    self.sidebar,
-                ))
-                .highlight_symbol("▸ ")
-                .highlight_style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
+            List::new([
+                "Proveedores",
+                "Modelos",
+                "Preferencias",
+                "Trazas",
+                "Conexión",
+            ])
+            .block(panel_block(
+                if self.sidebar {
+                    "Menú · ↑↓ Enter"
+                } else {
+                    "Menú · Esc volver"
+                },
+                self.sidebar,
+            ))
+            .highlight_symbol("▸ ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             navigation,
             &mut state,
         );
         let guidance = if let Some(form) = &self.form {
             match form.action {
-                Action::Setup => {
-                    "Elige la base con ←→. Enter avanza; confirma en Configurar servidor."
+                Action::Connection => {
+                    "Configura el endpoint y la clave del proxy. Los datos de proveedores permanecen en el servidor."
                 }
                 Action::DeleteProvider(_) | Action::DeleteModel(_) | Action::ClearTraces => {
                     "Revisa la acción. Escribe ELIMINAR y confirma en Guardar cambios; Esc cancela."
@@ -82,6 +88,9 @@ impl Panel {
                     "Elige un modelo y pulsa Enter para activarlo, editarlo o consultar sus datos."
                 }
                 2 => "Ajusta el proxy y sincroniza su catálogo con Claude Code.",
+                4 => {
+                    "Cambia de servidor, configura la clave y gestiona el servicio de este equipo."
+                }
                 _ => {
                     "Revisa cómo se transforman las peticiones y configura la captura de diagnóstico."
                 }
@@ -98,15 +107,7 @@ impl Panel {
                 .enumerate()
                 .map(|(i, f)| {
                     let value = f.display(i == form.selected);
-                    let label = if matches!(form.action, Action::Setup) && i == 1 {
-                        if form.fields[0].value == "sqlite" {
-                            "Ruta SQLite (vacío: directorio del servidor)"
-                        } else {
-                            "URL de conexión con usuario y contraseña (DSN)"
-                        }
-                    } else {
-                        f.label
-                    };
+                    let label = f.label;
                     ListItem::new(format!("{label}\n  {value}\n")).style(if i == form.selected {
                         Style::default().fg(Color::Cyan)
                     } else {
@@ -114,11 +115,13 @@ impl Panel {
                     })
                 })
                 .collect::<Vec<_>>();
-            rows.push(ListItem::new(if matches!(form.action, Action::Setup) {
-                "[ Configurar servidor ]"
-            } else {
-                "[ Guardar cambios ]"
-            }));
+            rows.push(ListItem::new(
+                if matches!(form.action, Action::Connection) {
+                    "[ Guardar conexión ]"
+                } else {
+                    "[ Guardar cambios ]"
+                },
+            ));
             if self.configured {
                 rows.push(ListItem::new("[ Cancelar ]"));
             }
@@ -143,6 +146,8 @@ impl Panel {
                     .block(panel_block("Detalle · ↑↓ / PgUp PgDn · Esc cerrar", true)),
                 areas[1],
             );
+        } else if self.tab == 4 {
+            frame.render_widget(Paragraph::new(format!("Endpoint: {}\nClave: {}\n\nEnter: conexión, conectividad y servicio local.\nSincroniza con Claude Code después de cambiar de servidor.",self.client.endpoint,if self.client.key.is_empty(){"sin configurar"}else{"configurada"})).wrap(Wrap{trim:false}).block(panel_block("Conexión",!self.sidebar)),areas[1]);
         } else if self.tab == 2 {
             let settings = &self.settings;
             let content = format!(

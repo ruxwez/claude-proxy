@@ -10,6 +10,8 @@ name = "claude-proxy-server"
 path = "src/main.rs"
 
 [dependencies]
+claude-proxy-service = { path = "../service" }
+subtle = "2"
 claude-proxy-engine = { path = "../engine" }
 directories = "6"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "postgres", "mysql"] }

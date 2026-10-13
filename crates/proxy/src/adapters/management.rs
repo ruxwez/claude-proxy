@@ -14,6 +14,7 @@ use tower::ServiceExt;
 
 // Composition belongs to the driving adapter, not the application or domain.
 pub struct Control {
+    pub auth: crate::auth::Auth,
     pub application: Arc<Application>,
     pub allowed_hosts: Vec<String>,
     pub traces: Option<Arc<crate::traces::Traces>>,
@@ -29,6 +30,7 @@ impl std::ops::Deref for Control {
 #[cfg(test)]
 fn control(application: Arc<Application>) -> Arc<Control> {
     Arc::new(Control {
+        auth: crate::auth::Auth::default(),
         application,
         allowed_hosts: vec![],
         traces: None,
@@ -68,6 +70,8 @@ pub fn router_with_control(app: Arc<Control>) -> Router {
         )
         .route("/api/providers/{id}/api-key", delete(clear_key))
         .route("/auth/callback", get(callback))
+        .route("/api/auth/callback", post(relayed_oauth))
+        .route("/api/zed/callback", post(relayed_zed))
         .route("/", get(zed_callback))
         .route("/api/providers/{id}/zed/auth", post(zed_start))
         .route(
@@ -81,6 +85,11 @@ pub fn router_with_control(app: Arc<Control>) -> Router {
 
 // Local admin has no login prompt. Reject foreign browser origins and DNS rebinding.
 async fn protect(State(app): State<Arc<Control>>, request: Request, next: Next) -> Response {
+    // Browser OAuth callbacks carry their existing state/PKCE or Zed challenge,
+    // not gateway credentials. All management API routes require AUTH_KEY.
+    if request.uri().path().starts_with("/api/") && !app.auth.accepts(request.headers()) {
+        return unauthorized();
+    }
     let host = request
         .headers()
         .get(header::HOST)
@@ -92,7 +101,8 @@ async fn protect(State(app): State<Arc<Control>>, request: Request, next: Next) 
         .ok()
         .and_then(|u| u.host_str())
         .is_some_and(|h| {
-            h == "localhost"
+            app.auth.enabled()
+                || h == "localhost"
                 || app
                     .allowed_hosts
                     .iter()
@@ -301,16 +311,27 @@ async fn metadata_providers() -> Result<Json<Value>, Failure> {
     Ok(Json(json!({"data":providers})))
 }
 
+#[derive(serde::Deserialize, Default)]
+struct CallbackPort {
+    callback_port: Option<u16>,
+}
+
 async fn zed_start(
     State(app): State<Arc<Control>>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Query(query): Query<CallbackPort>,
 ) -> Result<Json<Value>, Failure> {
-    let port = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|host| reqwest::Url::parse(&format!("http://{host}")).ok())
-        .and_then(|url| url.port())
+    let port = query
+        .callback_port
+        .filter(|p| *p > 0)
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|host| reqwest::Url::parse(&format!("http://{host}")).ok())
+                .and_then(|url| url.port())
+        })
         .unwrap_or(10801);
     crate::zed::start(&app, &id, port)
         .await
@@ -351,7 +372,13 @@ async fn zed_callback(
         Err(error) => failure(error).into_response(),
     }
 }
-async fn cli_config(State(app): State<Arc<Control>>, headers: HeaderMap) -> Json<Value> {
+#[derive(Clone)]
+struct GatewayEndpoint;
+async fn cli_config(
+    State(app): State<Arc<Control>>,
+    headers: HeaderMap,
+    gateway: Option<axum::Extension<GatewayEndpoint>>,
+) -> Json<Value> {
     let settings = app.settings();
     let mut base = reqwest::Url::parse(&format!(
         "http://{}",
@@ -362,10 +389,11 @@ async fn cli_config(State(app): State<Arc<Control>>, headers: HeaderMap) -> Json
     ))
     .unwrap();
     let _ = base.set_port(Some(app.port));
-    let base = settings
-        .public_url
-        .clone()
-        .unwrap_or_else(|| base.as_str().trim_end_matches('/').into());
+    let public_url = std::env::var("PROXY_PUBLIC_URL")
+        .ok()
+        .or(settings.public_url.clone());
+    let explicit = public_url.is_some();
+    let base = public_url.unwrap_or_else(|| base.as_str().trim_end_matches('/').into());
     let mut env = json!({});
     if let Some(n) = settings.context_tokens {
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = json!(n.to_string());
@@ -374,24 +402,51 @@ async fn cli_config(State(app): State<Arc<Control>>, headers: HeaderMap) -> Json
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = json!(n.to_string());
     }
     Json(
-        json!({"data":settings.models(),"has_more":false,"anthropic_base_url":base,"default_model":settings.default_model,"env":env}),
+        json!({"data":settings.models(),"has_more":false,"anthropic_base_url":base,"anthropic_port":app.port,"public_url_explicit":explicit,"gateway_on_this_endpoint":gateway.is_some(),"default_model":settings.default_model,"env":env}),
     )
 }
 async fn start_oauth(
     State(app): State<Arc<Control>>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Query(query): Query<CallbackPort>,
 ) -> Result<Json<Value>, Failure> {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let port = reqwest::Url::parse(&format!("http://{host}"))
-        .ok()
-        .and_then(|u| u.port())
+    let port = query
+        .callback_port
+        .filter(|p| *p > 0)
+        .or_else(|| {
+            reqwest::Url::parse(&format!("http://{host}"))
+                .ok()
+                .and_then(|u| u.port())
+        })
         .ok_or_else(|| failure("No se pudo determinar el puerto de el CLI"))?;
     let url = oauth::start(&app, &id, port).await.map_err(failure)?;
     Ok(Json(json!({"url":url})))
+}
+async fn relayed_oauth(
+    State(app): State<Arc<Control>>,
+    Json(input): Json<oauth::Callback>,
+) -> Result<Json<Value>, Failure> {
+    oauth::complete(&app, input).await.map_err(failure)?;
+    Ok(Json(json!({"connected":true})))
+}
+#[derive(serde::Deserialize)]
+struct ZedCallback {
+    user_id: u32,
+    access_token: String,
+}
+async fn relayed_zed(
+    State(app): State<Arc<Control>>,
+    Json(input): Json<ZedCallback>,
+) -> Result<Json<Value>, Failure> {
+    crate::zed::callback(&app, input.user_id, &input.access_token)
+        .await
+        .map_err(failure)?;
+    Ok(Json(json!({"connected":true})))
 }
 async fn callback(
     State(app): State<Arc<Control>>,
@@ -489,6 +544,22 @@ pub fn gateway_with_control(app: Arc<Control>) -> Router {
 }
 async fn dispatch(State(gateway): State<Arc<Gateway>>, mut request: Request) -> Response {
     let app = &gateway.app;
+    if request.uri().path().starts_with("/api/")
+        || request.uri().path() == "/auth/callback"
+        || request.uri().path() == "/"
+    {
+        request.extensions_mut().insert(GatewayEndpoint);
+        return router_with_control(app.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+    }
+    if request.uri().path() != "/health" && !app.auth.accepts(request.headers()) {
+        return unauthorized();
+    }
+    // Strip incoming gateway credentials even when authentication is disabled.
+    request.headers_mut().remove(header::AUTHORIZATION);
+    request.headers_mut().remove("x-api-key");
     if matches!(
         request.uri().path(),
         "/v1/messages" | "/v1/messages/count_tokens"
@@ -520,4 +591,8 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, mut request: Request) -> 
         cached.as_ref().unwrap().1.clone()
     };
     route.oneshot(request).await.unwrap()
+}
+
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, Json(json!({"type":"error","error":{"type":"authentication_error","message":"Clave del proxy ausente o inválida"}}))).into_response()
 }

@@ -3,78 +3,139 @@
 Monorepo Rust con motor de conversión independiente, servidor hexagonal y panel
 TUI con Ratatui. No requiere Node ni incluye una UI web.
 
-## Arranque
+## Instalación y conexión
+
+Descarga el paquete de tu plataforma de [Releases](https://github.com/ruxwez/claude-proxy/releases)
+y extrae `claude-proxy` y `claude-proxy-server` juntos. En Linux/macOS marca ambos
+como ejecutables (`chmod +x claude-proxy claude-proxy-server`) y ejecuta el CLI:
 
 ```sh
-cargo build --workspace --locked
-cargo run --locked -p claude-proxy-server
-# En otro terminal:
-cargo run --locked -p cli
+./claude-proxy
 ```
 
-Para instalar los ejecutables:
+El CLI comprueba primero la conexión guardada. Si falla, comprueba exclusivamente
+`127.0.0.1` y `::1` en el puerto REST estándar **10801**, con timeout de dos
+segundos por intento, sin utilizar proxies HTTP para loopback. No escanea la LAN ni utiliza broadcast, mDNS o subredes.
+Ofrece reutilizar un servidor local encontrado; si no hay uno funcional, puedes
+**instalar el servidor local** o **introducir un endpoint y una clave opcional**.
+
+La instalación local copia el servidor a un directorio estable, fuerza SQLite,
+registra un servicio del sistema, activa el arranque automático, lo inicia y
+comprueba su disponibilidad antes de guardar la conexión. Linux utiliza systemd,
+macOS launchd y Windows un Windows Service nativo. Solo las operaciones que
+modifican servicios solicitan sudo/UAC. El servicio escucha en **127.0.0.1**.
+Las reinstalaciones reutilizan el ejecutable y los datos existentes.
+
+El paquete distribuido incluye ambos ejecutables para instalar sin herramientas
+de compilación ni descargar nada más. Si solo tienes el CLI, busca el servidor
+junto a él o en PATH y, como alternativa, descarga el binario y su SHA-256 de la
+release de la misma versión. En repositorios privados descarga el paquete con
+una cuenta autorizada: el CLI no solicita ni guarda un token de GitHub.
+
+Para compilar e instalar desde el repositorio (Rust 1.96 y compilador C):
 
 ```sh
+cargo build --workspace --release --locked
 cargo install --locked --path crates/proxy
 cargo install --locked --path crates/cli
-claude-proxy-server
 claude-proxy
 ```
 
-El ejecutable del panel es `claude-proxy`; su paquete es `cli`. El servidor es
-`claude-proxy-server`. Por defecto escucha en loopback:
+También puedes ejecutar `claude-proxy-server` directamente, sin CLI ni Docker.
+Los proveedores y modelos se configuran desde el panel; después utiliza su acción
+**Sincronizar modelos con Claude Code**, como antes.
 
-| Servicio | Endpoint |
+| Servicio | Endpoint predeterminado |
 |---|---|
-| Administración REST | `http://127.0.0.1:10801/api/*` |
-| API Anthropic | `http://127.0.0.1:10800/v1/*` |
-| Salud del gateway | `http://127.0.0.1:10800/health` |
+| Gateway Anthropic y administración | `http://127.0.0.1:10800` (`/v1/*`, `/api/*`) |
+| Puerto REST conservado | `http://127.0.0.1:10801/api/*` |
+| Salud sin autenticación | `http://127.0.0.1:10800/health` |
 
-El CLI busca primero el servidor local en 10801. Si no está disponible, prueba
-el endpoint guardado y finalmente solicita otro. Verifica la identidad mediante
-`/api/status` antes de guardar la conexión. `--endpoint` o `CLAUDE_PROXY_URL`
-seleccionan explícitamente un servidor. El puerto Anthropic real se obtiene de
-la API; admite una URL pública propia en preferencias.
+Los servidores LAN/remotos se introducen manualmente, por ejemplo
+`https://proxy.example.com` o `http://192.168.1.20:10800`. El CLI nunca descubre
+otros equipos. `--endpoint`/`CLAUDE_PROXY_URL` seleccionan un servidor explícito;
+`CLAUDE_PROXY_API_KEY` permite suministrar la clave sin ponerla en los argumentos.
 
-El endpoint se escribe atómicamente en la carpeta convencional de configuración
-mediante `directories::ProjectDirs`:
+## Bases de datos y autenticación
 
-- Windows: `%APPDATA%/claude-proxy/config/config.json`.
-- Linux: `$XDG_CONFIG_HOME/claude-proxy/config.json` o `~/.config/claude-proxy/config.json`.
-- macOS: `~/Library/Application Support/claude-proxy/config.json`.
+El servidor se configura e inicializa automáticamente al arrancar:
 
-Ese archivo contiene únicamente el endpoint REST. El servidor guarda su
-infraestructura en `server/` dentro de esa carpeta; `--config-dir` permite
-cambiarla. No se leen claves de `.env` en producción.
+- Sin `DATABASE_URL`: SQLite persistente en `server/proxy.sqlite3`.
+- `sqlite:///ruta/absoluta.sqlite3` o `sqlite://archivo.sqlite3`: SQLite persistente.
+- `postgres://usuario:clave@host/base` / `postgresql://...`: PostgreSQL mediante SQLx.
+- `mysql://usuario:clave@host/base`: MySQL mediante SQLx.
 
-## Primera configuración y bases de datos
+Las bases externas deben existir; se crean las tablas y se aplican las migraciones
+al arrancar. `SettingsStore` mantiene un único contrato de persistencia y los
+mismos casos de uso para los tres motores. La configuración sigue siendo un
+documento JSON transaccional; no se añaden ORM ni tablas de negocio redundantes.
+Las migraciones del documento y de OpenAI/ChatGPT conservan IDs y credenciales.
+Solo debe haber un servidor por base: los snapshots son locales al proceso.
 
-Si `/api/status` indica que falta configurar el servidor, el TUI abre un
-asistente obligatorio para elegir `sqlite`, `postgres` o `mysql`.
+`--database /ruta/existente.sqlite3` tiene prioridad y fuerza SQLite (el CLI lo
+utiliza para instalaciones locales). Después se aplica `DATABASE_URL`, luego el
+archivo legado `server/database.json`, la base antigua `claude-proxy.sqlite3` y,
+finalmente, SQLite predeterminado. Se conservan las bases antiguas sin copiarlas
+mientras están abiertas. Cambiar el motor no copia datos entre bases: realiza una
+migración o restauración explícita. El CLI ya no ofrece seleccionar un motor.
 
-Para SQLite, deja vacía la ruta para utilizar `server/proxy.sqlite3`. Las rutas
-se interpretan en el equipo del servidor. Para PostgreSQL/MySQL introduce el DSN,
-por ejemplo `postgres://usuario:clave@host/base` o `mysql://usuario:clave@host/base`.
-La base remota debe existir y el usuario necesita permisos para crear la tabla
-`settings`. Las opciones TLS se indican en el DSN según SQLx.
+Sin `AUTH_KEY`, las APIs no exigen clave. Si está definida, protege todas las
+rutas `/api/*` y `/v1/*` en ambos puertos. Es una única clave compartida, sin
+usuarios, JWT de acceso, OAuth de acceso ni sesiones. Se compara un digest de
+longitud fija en tiempo constante; una clave vacía definida se rechaza.
 
-El servidor comprueba la conexión y persiste la selección en `server/database.json`.
-Las credenciales de los proveedores y los tokens OAuth permanecen en la base de
-datos elegida; el CLI recibe únicamente su estado. El DSN permanece en el servidor.
-La selección inicial solo se acepta una vez. Para cambiar infraestructura después,
-detén el servidor y modifica su archivo `database.json`; conserva una copia de la
-base y migra los datos si seleccionas otra base vacía.
+Se conserva la inyección existente de `ANTHROPIC_API_KEY` en Claude Code, enviada
+como `X-Api-Key`. El servidor también admite `ANTHROPIC_AUTH_TOKEN` mediante
+`Authorization: Bearer`. Si llegan ambos headers, Authorization tiene prioridad.
+Esto sigue la [documentación oficial de Claude Code](https://code.claude.com/docs/en/llm-gateway-connect#how-the-credential-variable-maps-to-a-header).
+Ambas cabeceras de acceso se eliminan antes del gateway; cada proveedor usa
+exclusivamente sus propias credenciales. `/health` y los callbacks de navegador
+siguen accesibles; estos últimos conservan sus estados de un solo uso, PKCE o
+challenge RSA. No hay un protocolo nuevo de autenticación de cliente.
 
-`--database /ruta/archivo.sqlite3` permite abrir directamente una base SQLite existente.
-Si encuentra el antiguo `claude-proxy.sqlite3` en el directorio de arranque y no hay
-configuración nueva, lo reutiliza y recuerda su ruta absoluta. No copia una base
-SQLite activa ni pierde sus credenciales. También mantiene la migración de las
-antiguas conexiones mixtas OpenAI/ChatGPT.
+## Configuración del CLI y servicio local
 
-La configuración es un documento JSON transaccional, sin ORM ni tablas por cada
-modelo. Las escrituras renuevan el snapshot del gateway después de persistir.
-SQLite usa WAL; PostgreSQL/MySQL usan SQLx y un trabajador dedicado. Solo debe
-haber un proceso de servidor por base, porque los snapshots son locales al proceso.
+La sección **Conexión** del panel permite ver el endpoint, cambiarlo, configurar
+una clave oculta, eliminarla, comprobar conectividad y gestionar el servicio de
+**este equipo**, aunque la conexión seleccionada sea remota. Cambiar de conexión
+no mueve ni borra datos del servidor. Si el servidor tiene modelos activos, cambiar
+la conexión desde el panel también sincroniza Claude Code.
+
+```sh
+claude-proxy config show
+claude-proxy config connect https://proxy.example.com
+claude-proxy config key            # solicita la clave sin mostrarla
+claude-proxy config key --clear
+claude-proxy config check
+claude-proxy service install       # local, siempre SQLite y loopback
+claude-proxy service start
+claude-proxy service stop
+claude-proxy service restart
+claude-proxy service status
+```
+
+El endpoint se guarda atómicamente en la carpeta habitual de `directories`:
+Windows `%APPDATA%/claude-proxy/config/config.json`, Linux
+`$XDG_CONFIG_HOME/claude-proxy/config.json` o `~/.config/claude-proxy/config.json`,
+macOS `~/Library/Application Support/claude-proxy/config.json`.
+`CLAUDE_PROXY_CONFIG_DIR` permite aislar la configuración del CLI.
+
+La clave se guarda preferentemente en Credential Manager (Windows), Keychain
+(macOS) o Secret Service (Linux). Si no están disponibles, utiliza un archivo
+separado protegido con permisos 0600/directorio 0700 en Unix o ACL privada en
+Windows. `config.json` contiene el endpoint y la referencia al almacén, nunca la
+clave. El panel y `config show` solo indican si está configurada. Claude Code
+recibe la clave en su `settings.json`, como en la integración existente; ese
+archivo y sus copias se protegen en Unix. No añadas esos archivos a repositorios.
+
+Los datos del servicio local están en `server/` dentro de la carpeta habitual;
+en Windows se utilizan `%ProgramData%/ClaudeProxy`, con permisos de LocalService.
+Los ejecutables gestionados se guardan en su subdirectorio `bin/`. La instalación
+no reemplaza un binario existente en uso. Para actualizarlo, detén el servicio,
+sustituye el binario gestionado y vuelve a iniciarlo; los datos se conservan.
+
+Las instrucciones completas de Docker, ejecución nativa y servicios están en
+[docs/deployment.md](docs/deployment.md).
 
 ## Panel de terminal
 
@@ -85,11 +146,11 @@ consultar y sincronizar con Claude Code; también funciona cuando la lista está
 `Esc` vuelve al nivel anterior y `F1` muestra la ayuda.
 
 En formularios, `↑↓` o `Tab` cambian de campo. Los tipos de proveedor, protocolos,
-bases de datos y opciones Sí/No se eligen con `←→`; no hay que escribir sus nombres.
+opciones Sí/No se eligen con `←→`; no hay que escribir sus nombres.
 `Enter` avanza al siguiente campo: solo guarda cuando seleccionas el botón
-**Guardar cambios** (o **Configurar servidor**). `Esc` cancela. Puedes mover el
+**Guardar cambios**. `Esc` cancela. Puedes mover el
 cursor con `←→`, `Inicio` y `Fin`, borrar con `Supr`/retroceso y vaciar con `Ctrl+U`.
-Las claves y DSN se ocultan. Los borrados de proveedores, modelos y trazas requieren
+Las claves se ocultan. Los borrados de proveedores, modelos y trazas requieren
 escribir `ELIMINAR` y confirmar el botón.
 
 Los siguientes atajos siguen disponibles dentro de cada sección; todas esas
@@ -117,8 +178,9 @@ retirados del catálogo permanecen configurables. Los fallos de catálogo no imp
 editar los modelos guardados. Los IDs públicos son `proveedor/modelo`.
 
 OAuth mantiene PKCE, state de un solo uso, nonce, JWKS y renovación en el servidor.
-El callback sigue en `http://127.0.0.1:10801/auth/callback`. La conexión ChatGPT se
-completa desde el equipo del servidor; el navegador muestra una confirmación y
+El CLI recibe el callback en un puerto loopback temporal y lo envía autenticado
+al servidor. Funciona también con servidores remotos. El intercambio de tokens
+se completa en el servidor; el navegador muestra una confirmación y
 se vuelve al TUI con `r`. No se necesita una aplicación web.
 
 ## Proveedor Zed nativo
@@ -134,8 +196,8 @@ el mensaje Anthropic completo a partir de los mismos eventos.
 En Proveedores, añade una conexión de tipo **Zed**, guarda y abre su menú con
 `Enter`. Elige **Conectar Zed en el navegador**; al terminar, actualiza los datos
 y abre **Ver y elegir modelos**. La conexión utiliza una clave RSA efímera y el
-callback nativo de Zed en `http://127.0.0.1:<puerto REST>/`. Ese puerto debe ser
-accesible desde el equipo del navegador, también con Docker o un túnel remoto.
+callback nativo de Zed en `http://127.0.0.1:<puerto temporal del CLI>/`. El CLI
+lo reenvía autenticado al servidor, también con Docker o servidores remotos.
 No se reinstala la UI web; el callback solo devuelve una confirmación de texto.
 
 Como alternativa, **Introducir credenciales de Zed** acepta el ID numérico de
@@ -230,6 +292,9 @@ crates/cli/                paquete cli; ejecutable claude-proxy
   src/control.rs          descubrimiento, cliente REST y configuración local
   src/tui.rs              panel Ratatui
   src/main.rs             arranque y sincronización de Claude Code
+  src/installation.rs     instalación automática y descarga verificada
+  src/callback.rs         callbacks loopback hacia el servidor remoto
+crates/service/            systemd, launchd y Windows Service nativo
 ```
 
 El motor no depende de Axum, Reqwest, Tokio, SQL, CLI ni filesystem. Recibe JSON y
@@ -254,7 +319,7 @@ cuando se dividen entre eventos y preservan el uso real del proveedor.
 | Método | Ruta | Función |
 |---|---|---|
 | GET | `/api/status` | Identidad, configuración y puerto Anthropic |
-| POST | `/api/setup` | Elegir infraestructura inicialmente |
+| POST | `/api/setup` | Compatibilidad heredada; un servidor iniciado ya está configurado |
 | GET / PUT | `/api/settings` | Configuración con credenciales ocultas |
 | GET | `/api/cli-config` | Modelos y preferencias de Claude Code |
 | POST | `/api/providers/catalog` | Catálogo y cotejo con models.dev |
@@ -264,10 +329,10 @@ cuando se dividen entre eventos y preservan el uso real del proveedor.
 | GET / DELETE | `/api/traces` | Consultar/borrar trazas; `?after=ID` pagina de 100 en 100 |
 | GET | `/api/traces/{id}` | Detalle de una traza |
 
-Las mutaciones requieren `Content-Type: application/json`. Se conservan las
+Las APIs usan la clave compartida si `AUTH_KEY` está definida. Las mutaciones requieren `Content-Type: application/json`. Se conservan las
 guardas de origen y DNS rebinding. La administración remota admite hosts IP y
-localhost; para un dominio propio añade `--admin-host proxy.example.com` al
-servidor. Expón el puerto solo a una red de confianza. Los puertos son
+localhost; con `AUTH_KEY` permite también dominios autenticados. Sin clave, para un dominio
+propio añade `--admin-host proxy.example.com` al servidor. Expón el puerto solo a una red de confianza. Los puertos son
 configurables mediante `--port` y `--admin-port` (`--ui-port` es alias legado).
 Las credenciales se guardan sin cifrado de aplicación; los archivos de servidor
 usan directorio 0700 y archivos sensibles 0600 en Unix.
@@ -281,9 +346,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Docker publica ambos puertos en loopback y guarda infraestructura y trazas en el
-volumen `proxy-data`. El panel se ejecuta en el terminal del host y se conecta al
-puerto 10801. No hay etapa de compilación frontend.
+Docker publica un puerto en loopback de forma predeterminada y guarda los datos
+en `proxy-data`. Ese endpoint sirve tanto `/v1/*` como `/api/*`; el CLI se ejecuta
+en el equipo del usuario. El puerto y la interfaz publicados son configurables.
+Consulta [despliegue](docs/deployment.md) y el nuevo
+[informe de verificación](docs/architecture-verification.md).
 
 La prueba de bases remotas requiere dos bases **desechables**:
 

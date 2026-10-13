@@ -90,8 +90,8 @@ def main():
         cli = None
         output = bytearray()
         try:
-            wait_for(lambda: get(endpoint + "/api/status")["configured"] is False)
-            environment = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(directory / "client"))
+            wait_for(lambda: get(endpoint + "/api/status")["configured"] is True)
+            environment = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(directory / "client"), CLAUDE_PROXY_CONFIG_DIR=str(directory / "client"))
             cli = subprocess.Popen([str(binaries / "claude-proxy"), "--endpoint", endpoint, "--settings", str(directory / "claude/settings.json")], stdin=slave, stdout=slave, stderr=slave, env=environment)
 
             def drain():
@@ -103,13 +103,16 @@ def main():
                 return text.encode() in output
 
             def send(keys):
-                os.write(master, keys.encode())
+                # Keep arrow escape sequences atomic, but pace individual keys
+                # as a terminal user would; macOS can coalesce repeated CR bursts.
+                for key in re.findall(r"\x1b\[[0-9;]*[A-Za-z~]|.", keys, re.S):
+                    os.write(master, key.encode())
+                    time.sleep(0.06)
+                    drain()
                 time.sleep(0.2)
                 drain()
 
-            wait_for(lambda: shown("Configurar"))
-            send("\r\r\r")  # Backend -> path -> visible Configure button.
-            wait_for(lambda: get(endpoint + "/api/status")["configured"] is True)
+            wait_for(lambda: shown("Proveedores"))
             send("\r\r\r")  # Sidebar -> actions -> Add provider.
             send("test\rLocal\r\r")
             send(f"http://127.0.0.1:{provider.server_port}\rtest-only-key\r\r\r\r")
@@ -165,7 +168,7 @@ def main():
             server = subprocess.Popen([str(binaries / "claude-proxy-server"), "--config-dir", str(directory / "server"), "--admin-port", str(rest), "--port", str(anthropic)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             wait_for(lambda: get(endpoint + "/api/settings")["providers"][0]["models"][0]["id"] == "deepseek-v4.1-flash")
             assert get(endpoint + "/api/settings")["providers"][1]["zed_connected"] is True
-            print("PTY smoke passed: arrows/Enter menus, setup, provider/key, protocol selector, Claude sync, trace policy, Zed account/catalog/model, restart, terminal restoration")
+            print("PTY smoke passed: arrows/Enter menus, automatic database setup, provider/key, protocol selector, Claude sync, trace policy, Zed account/catalog/model, restart, terminal restoration")
         except Exception:
             visible = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(output))
             print("PTY diagnostic:", visible[-4000:].decode("utf-8", errors="replace"))

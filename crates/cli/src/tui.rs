@@ -19,7 +19,7 @@ enum Action {
     Provider(Option<usize>),
     Model(Option<usize>),
     Preferences,
-    Setup,
+    Connection,
     TracePolicy,
     ZedAccount(usize),
     DeleteProvider(usize),
@@ -57,7 +57,7 @@ impl Panel {
         let status = client.get("/api/status").await?;
         let settings = client.get("/api/settings").await?;
         let configured = status["configured"] == true;
-        let mut panel = Self {
+        let panel = Self {
             client,
             settings,
             catalog: vec![],
@@ -77,18 +77,6 @@ impl Panel {
             menu: None,
             help: false,
         };
-        if !configured {
-            panel.form = Some(Form {
-                title: "Configurar servidor",
-                fields: vec![
-                    Field::choice("Base de datos", "sqlite", &["sqlite", "postgres", "mysql"]),
-                    Field::new("Ruta SQLite (vacío: directorio del servidor) o DSN", ""),
-                ],
-                selected: 0,
-                action: Action::Setup,
-            });
-            panel.form.as_mut().unwrap().fields[1].secret = true;
-        }
         Ok(panel)
     }
     fn providers(&self) -> &[Value] {
@@ -275,7 +263,7 @@ impl Panel {
             ));
         }
     }
-    async fn submit(&mut self) -> Result<()> {
+    async fn submit(&mut self, args: &crate::Args) -> Result<()> {
         let form = self.form.as_ref().context("Formulario ausente")?;
         let values: Vec<_> = form
             .fields
@@ -416,18 +404,53 @@ impl Panel {
                 next["traces"] =
                     json!({"enabled":enabled,"retention_hours":hours,"full_until":until});
             }
-            Action::Setup => {
-                let body = match values[0].as_str() {
-                    "sqlite" => json!({"backend":"sqlite","path":values[1]}),
-                    "postgres" | "mysql" => json!({"backend":values[0],"url":values[1]}),
-                    _ => anyhow::bail!("Backend inválido"),
+            Action::Connection => {
+                let key = if values[2] == "true" {
+                    ""
+                } else if values[1].is_empty() && crate::urls(&values[0])?.0 == self.client.endpoint
+                {
+                    self.client.key.as_str()
+                } else {
+                    &values[1]
                 };
-                self.client
-                    .request(reqwest::Method::POST, "/api/setup", Some(&body))
-                    .await?;
-                self.configured = true;
-                self.form = None;
-                self.refresh().await?;
+                let client = if values[2] == "true"
+                    && crate::urls(&values[0])?.0 == self.client.endpoint
+                {
+                    let client = Client::with_key(&values[0], "")?;
+                    crate::control::remember(&client)?;
+                    if client.probe().await.is_err() {
+                        self.client = client;
+                        self.form = None;
+                        self.message="Clave eliminada del CLI. El servidor requiere una clave; puedes añadirla de nuevo desde Conexión.".into();
+                        return Ok(());
+                    }
+                    client
+                } else {
+                    crate::control::configure(&values[0], key).await?
+                };
+                *self = Self::load(client).await?;
+                self.tab = 4;
+                self.sidebar = false;
+                let mut sync = args.clone();
+                sync.endpoint = self.client.endpoint.clone();
+                sync.api_key = self.client.key.clone();
+                if self.settings["providers"]
+                    .as_array()
+                    .is_some_and(|providers| {
+                        providers.iter().any(|p| {
+                            p["enabled"] != false
+                                && p["models"].as_array().is_some_and(|models| {
+                                    models.iter().any(|m| m["enabled"] != false)
+                                })
+                        })
+                    })
+                {
+                    crate::run(&sync).await?;
+                    self.message =
+                        "Conexión guardada y Claude Code actualizado. Reinicia Claude Code.".into();
+                } else {
+                    self.message="Conexión guardada. Configura proveedores y modelos para conectar Claude Code.".into();
+                }
                 return Ok(());
             }
             Action::DeleteProvider(index) => {
@@ -513,6 +536,14 @@ impl Panel {
             2 => vec![
                 ("Editar preferencias", Char('e')),
                 ("Restaurar límites de contexto", Char('R')),
+            ],
+            4 => vec![
+                ("Cambiar endpoint / clave", Char('e')),
+                ("Comprobar conectividad", Char('c')),
+                ("Iniciar servicio local", Char('I')),
+                ("Detener servicio local", Char('D')),
+                ("Reiniciar servicio local", Char('J')),
+                ("Estado del servicio local", Char('V')),
             ],
             _ => {
                 let mut items = vec![("Configurar captura de trazas", Char('e'))];
@@ -609,7 +640,7 @@ impl Panel {
                 KeyCode::Enter if form.selected < form.fields.len() => {
                     form.selected += 1;
                 }
-                KeyCode::Enter if form.selected == form.fields.len() => self.submit().await?,
+                KeyCode::Enter if form.selected == form.fields.len() => self.submit(args).await?,
                 KeyCode::Enter => self.form = None,
                 _ => {
                     if let Some(field) = form.fields.get_mut(form.selected) {
@@ -700,11 +731,11 @@ impl Panel {
             if self.sidebar {
                 match key {
                     KeyCode::Down => {
-                        self.tab = (self.tab + 1) % 4;
+                        self.tab = (self.tab + 1) % 5;
                         self.selected = 0;
                     }
                     KeyCode::Up => {
-                        self.tab = (self.tab + 3) % 4;
+                        self.tab = (self.tab + 4) % 5;
                         self.selected = 0;
                     }
                     KeyCode::Enter | KeyCode::Right | KeyCode::Tab => self.enter_section().await?,
@@ -833,18 +864,19 @@ impl Panel {
                 } else {
                     "oauth"
                 };
+                let callback_port = crate::callback::listen(self.client.clone()).await?;
                 let result = self
                     .client
                     .request(
                         reqwest::Method::POST,
-                        &format!("/api/providers/{id}/{resource}"),
+                        &format!("/api/providers/{id}/{resource}?callback_port={callback_port}"),
                         Some(&json!({})),
                     )
                     .await?;
                 let url = result["url"].as_str().context("Falta URL OAuth")?;
                 let _ = webbrowser::open(url);
                 self.detail = Some(format!(
-                    "Completa la conexión en el navegador. Debe poder acceder al puerto REST del servidor en 127.0.0.1.\n\nVuelve a Proveedores y elige Actualizar datos.\n\n{url}"
+                    "Completa la conexión en el navegador. Mantén el CLI abierto para recibir la respuesta local y enviarla al servidor.\n\nVuelve a Proveedores y elige Actualizar datos.\n\n{url}"
                 ));
             }
             KeyCode::Char('z')
@@ -935,6 +967,7 @@ impl Panel {
             KeyCode::Char('s') => {
                 let mut sync = args.clone();
                 sync.endpoint = self.client.endpoint.clone();
+                sync.api_key = self.client.key.clone();
                 let report = crate::run(&sync).await?;
                 self.message = format!(
                     "Claude Code: {} modelos, {}. Reinicia Claude Code.",
@@ -945,6 +978,44 @@ impl Panel {
                         "sin cambios"
                     }
                 );
+            }
+            KeyCode::Char('e') if self.tab == 4 => {
+                let mut fields = vec![
+                    Field::new("Endpoint REST", &self.client.endpoint),
+                    Field::new("Clave nueva (vacío: conservar)", ""),
+                    Field::choice("Eliminar clave", "false", &["false", "true"]),
+                ];
+                fields[1].secret = true;
+                self.form = Some(Form {
+                    title: "Conexión del CLI",
+                    fields,
+                    selected: 0,
+                    action: Action::Connection,
+                });
+            }
+            KeyCode::Char('c') if self.tab == 4 => {
+                let status = self.client.probe().await?;
+                self.message = format!(
+                    "Servidor disponible · versión {}",
+                    status["version"].as_str().unwrap_or("desconocida")
+                );
+            }
+            KeyCode::Char('I' | 'D' | 'J' | 'V') if self.tab == 4 => {
+                // Leave raw/alternate mode for sudo/UAC and status output.
+                ratatui::restore();
+                let action = match key {
+                    KeyCode::Char('I') => claude_proxy_service::Action::Start,
+                    KeyCode::Char('D') => claude_proxy_service::Action::Stop,
+                    KeyCode::Char('J') => claude_proxy_service::Action::Restart,
+                    _ => claude_proxy_service::Action::Status,
+                };
+                let result = claude_proxy_service::manage(&action);
+                eprintln!("Pulsa Enter para volver al panel.");
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                let _ = ratatui::init();
+                result?;
+                self.message = "Operación del servicio local completada".into();
             }
             KeyCode::Char('e') if self.tab == 3 => {
                 self.form = Some(Form {

@@ -100,9 +100,9 @@ pub(crate) fn deepseek(model: &str) -> bool {
 
 pub fn responses_state(model: &str, item: &Value) -> Result<Option<Value>> {
     if item["type"] != "reasoning"
-        || !item["encrypted_content"]
+        || item["encrypted_content"]
             .as_str()
-            .is_some_and(|s| !s.is_empty())
+            .is_none_or(|s| s.is_empty())
     {
         return Ok(None);
     }

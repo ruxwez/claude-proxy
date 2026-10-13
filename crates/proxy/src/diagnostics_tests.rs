@@ -36,6 +36,7 @@ async fn remote_admin_accepts_only_explicit_dns_hosts() {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(SqliteStore::open(&directory.path().join("settings.db")).unwrap());
     let control = Arc::new(Control {
+        auth: crate::auth::Auth::default(),
         application: Arc::new(Application::open(store, 10800).unwrap()),
         allowed_hosts: vec!["proxy.example.com".into()],
         traces: None,
@@ -72,6 +73,7 @@ async fn setup_selects_server_database_and_survives_restart() {
     let application = Arc::new(Application::open(store, 10800).unwrap());
     let config = directory.path().join("database.json");
     let control = Arc::new(Control {
+        auth: crate::auth::Auth::default(),
         application,
         traces: None,
         bootstrap: Some(config.clone()),
@@ -133,6 +135,7 @@ async fn traces_capture_all_boundaries_and_deepseek_sse_without_sensitive_conten
     store.save(&settings).unwrap();
     let traces = Traces::open(&directory.path().join("traces.sqlite3")).unwrap();
     let control = Arc::new(Control {
+        auth: crate::auth::Auth::default(),
         application: Arc::new(Application::open(store, 10800).unwrap()),
         traces: Some(traces.clone()),
         bootstrap: None,
