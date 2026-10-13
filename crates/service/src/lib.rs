@@ -44,10 +44,10 @@ pub struct Spec {
 pub fn local_directory() -> Result<PathBuf> {
     #[cfg(windows)]
     {
-        return Ok(PathBuf::from(
-            std::env::var_os("ProgramData").context("ProgramData no disponible")?,
+        Ok(
+            PathBuf::from(std::env::var_os("ProgramData").context("ProgramData no disponible")?)
+                .join("ClaudeProxy"),
         )
-        .join("ClaudeProxy"));
     }
     #[cfg(not(windows))]
     {
@@ -198,7 +198,7 @@ pub fn definition(spec: &Spec, account: &str) -> Result<String> {
         };
         Ok(format!(
             "[Unit]\nDescription=Claude Proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={account}\nWorkingDirectory={}\nExecStart={} {}\n{env}Restart=on-failure\nRestartSec=3\nTimeoutStopSec=20\nUMask=0077\nNoNewPrivileges=true\n\n[Install]\nWantedBy=multi-user.target\n",
-            quote(&spec.directory.to_string_lossy()),
+            spec.directory.to_string_lossy().replace('%', "%%"),
             quote(&spec.binary.to_string_lossy()),
             args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")
         ))
@@ -447,4 +447,39 @@ mod tests {
             assert!(definition.contains("/etc/claude-proxy.env"));
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn systemd_unit_accepts_paths_with_spaces_in_real_parser() {
+    if !std::path::Path::new("/usr/bin/systemd-analyze").is_file() {
+        return;
+    }
+    let directory = tempfile::Builder::new()
+        .prefix("proxy unit ")
+        .tempdir()
+        .unwrap();
+    let binary = directory.path().join("server executable");
+    std::fs::copy("/bin/true", &binary).unwrap();
+    let spec = Spec {
+        binary,
+        directory: directory.path().into(),
+        host: "127.0.0.1".into(),
+        port: 10800,
+        admin_port: 10801,
+        local: true,
+        environment: Default::default(),
+    };
+    let unit = directory.path().join("claude-proxy-test.service");
+    std::fs::write(&unit, definition(&spec, &user().unwrap()).unwrap()).unwrap();
+    let output = Process::new("systemd-analyze")
+        .arg("verify")
+        .arg(unit)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

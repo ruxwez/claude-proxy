@@ -67,7 +67,7 @@ def main():
             wait_status(base, True)
             print("Native service: install, autostart registration, idempotent reinstall, stop/start/restart/status OK")
         finally:
-            service("stop")
+            subprocess.run([str(binary), "service", "stop"], check=False, timeout=60)
             if os.name == "nt":
                 subprocess.run(["sc.exe", "delete", "claude-proxy"], check=True)
             elif sys.platform == "darwin":

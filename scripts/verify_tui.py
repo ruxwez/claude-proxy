@@ -103,7 +103,12 @@ def main():
                 return text.encode() in output
 
             def send(keys):
-                os.write(master, keys.encode())
+                # Keep arrow escape sequences atomic, but pace individual keys
+                # as a terminal user would; macOS can coalesce repeated CR bursts.
+                for key in re.findall(r"\x1b\[[0-9;]*[A-Za-z~]|.", keys, re.S):
+                    os.write(master, key.encode())
+                    time.sleep(0.06)
+                    drain()
                 time.sleep(0.2)
                 drain()
 
