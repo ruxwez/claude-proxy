@@ -82,9 +82,11 @@ fn elevate(script: &str) -> Result<()> {
     let script_path = file.into_temp_path();
     let path = ps(&script_path.to_string_lossy());
     let wrapper = format!(
-        r#"$p=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent(); if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ & {path} }} else {{ $proc=Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+{path}+'"')); exit $proc.ExitCode }}"#
+        r#"$p=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent(); if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ & {path} }} else {{ $proc=Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+{path}+'"')); exit $proc.ExitCode }}"#
     );
     let mut command = Process::new("powershell.exe");
+    // Do not inherit incompatible PowerShell 7 modules from the terminal.
+    command.env_remove("PSModulePath");
     command.args(["-NoProfile", "-Command", &wrapper]);
     checked(command)
 }

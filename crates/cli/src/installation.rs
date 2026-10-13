@@ -192,7 +192,8 @@ pub async fn update() -> Result<String> {
         // The installer owns both files, so this does not require elevation.
         let quote =
             |path: &std::path::Path| format!("'{}'", path.to_string_lossy().replace('\'', "''"));
-        let status = std::process::Command::new("powershell.exe").args([
+        // PowerShell 7 hosts can export module paths incompatible with 5.1.
+        let status = std::process::Command::new("powershell.exe").env_remove("PSModulePath").args([
             "-NoProfile", "-Command", &format!("$ErrorActionPreference='Stop'; Get-Acl -LiteralPath {} | Set-Acl -LiteralPath {}", quote(&destination), quote(&staged))
         ]).status()?;
         ensure!(

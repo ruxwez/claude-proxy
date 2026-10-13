@@ -45,6 +45,13 @@ tag: omite versiones ya publicadas en crates.io y completa la release existente.
 No reutilices un tag para código distinto; crates.io no permite sobrescribir una
 versión. Las releases ya públicas se verifican y sus archivos no se reemplazan.
 
+Desde v0.1.1, el panel Conexión y `claude-proxy service update` actualizan el
+servidor local a la última release estable con verificación y recuperación del
+binario anterior. v0.1.2 corrige la herencia de `PSModulePath` de PowerShell 7
+al ejecutar Windows PowerShell 5.1, tanto al conservar ACL como al gestionar el
+servicio. Se comprobó una actualización real de 0.1.0 a 0.1.1 manteniendo intacto
+el documento de configuración de SQLite, incluidas sus credenciales.
+
 Para comprobar los scripts sin publicar:
 
 ```sh
