@@ -1,31 +1,19 @@
+mod draw;
+mod field;
+use field::{Field, choice_name};
+
 use crate::control::Client;
 use anyhow::{Context, Result, ensure};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout},
-    style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
-};
 use serde_json::{Value, json};
 use std::{
     io::IsTerminal,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-struct Field {
-    label: &'static str,
-    value: String,
-    secret: bool,
-}
-impl Field {
-    fn new(label: &'static str, value: impl ToString) -> Self {
-        Self {
-            label,
-            value: value.to_string(),
-            secret: false,
-        }
-    }
+struct Menu {
+    items: Vec<(&'static str, KeyCode)>,
+    selected: usize,
 }
 enum Action {
     Provider(Option<usize>),
@@ -33,7 +21,9 @@ enum Action {
     Preferences,
     Setup,
     TracePolicy,
+    ZedAccount(usize),
     DeleteProvider(usize),
+    DeleteModel(usize),
     ClearTraces,
 }
 struct Form {
@@ -58,6 +48,9 @@ struct Panel {
     message: String,
     configured: bool,
     trace_cursors: Vec<String>,
+    sidebar: bool,
+    menu: Option<Menu>,
+    help: bool,
 }
 impl Panel {
     async fn load(client: Client) -> Result<Self> {
@@ -80,12 +73,15 @@ impl Panel {
             message: String::new(),
             configured,
             trace_cursors: vec![],
+            sidebar: true,
+            menu: None,
+            help: false,
         };
         if !configured {
             panel.form = Some(Form {
                 title: "Configurar servidor",
                 fields: vec![
-                    Field::new("Backend: sqlite / postgres / mysql", "sqlite"),
+                    Field::choice("Base de datos", "sqlite", &["sqlite", "postgres", "mysql"]),
                     Field::new("Ruta SQLite (vacío: directorio del servidor) o DSN", ""),
                 ],
                 selected: 0,
@@ -184,9 +180,17 @@ impl Panel {
         let mut fields = vec![
             Field::new("ID", text(&p, "id")),
             Field::new("Nombre", text(&p, "name")),
-            Field::new(
-                "Tipo: opencode_go / openai / chatgpt / google / openai_compatible",
+            Field::choice(
+                "Tipo de proveedor",
                 text(&p, "kind"),
+                &[
+                    "opencode_go",
+                    "openai",
+                    "chatgpt",
+                    "google",
+                    "openai_compatible",
+                    "zed",
+                ],
             ),
             Field::new(
                 "Endpoint (vacío: predeterminado del tipo)",
@@ -197,12 +201,20 @@ impl Panel {
                 "Proveedor de models.dev (opcional)",
                 text(&p, "models_dev_provider"),
             ),
-            Field::new(
-                "Habilitado: true / false",
+            Field::choice(
+                "Habilitado",
                 p["enabled"].as_bool().unwrap_or(true),
+                &["true", "false"],
             ),
         ];
         fields[4].secret = true;
+        if p["kind"] == "zed" {
+            fields[4] = Field::choice(
+                "Cuenta Zed: conectar desde el menú del proveedor",
+                "",
+                &[""],
+            );
+        }
         self.form = Some(Form {
             title: "Conexión de proveedor",
             fields,
@@ -216,28 +228,52 @@ impl Panel {
             fields: vec![
                 Field::new("ID", text(&model, "id")),
                 Field::new("Nombre", text(&model, "display_name")),
-                Field::new(
-                    "Protocolo: chat / responses / messages",
-                    model["protocol"].as_str().unwrap_or(
-                        if self
-                            .providers()
-                            .get(self.provider)
-                            .is_some_and(|p| p["kind"] == "chatgpt")
-                        {
-                            "responses"
-                        } else {
-                            "chat"
-                        },
-                    ),
+                Field::choice(
+                    "Protocolo",
+                    model["protocol"]
+                        .as_str()
+                        .or_else(|| model["suggested_protocol"].as_str())
+                        .unwrap_or(
+                            if self
+                                .providers()
+                                .get(self.provider)
+                                .is_some_and(|p| p["kind"] == "chatgpt")
+                            {
+                                "responses"
+                            } else {
+                                "chat"
+                            },
+                        ),
+                    &["chat", "responses", "messages"],
                 ),
-                Field::new(
-                    "Habilitado: true / false",
+                Field::choice(
+                    "Habilitado",
                     model["enabled"].as_bool().unwrap_or(true),
+                    &["true", "false"],
                 ),
             ],
             selected: 0,
             action: Action::Model(index),
         });
+        if self.current_provider().is_ok_and(|p| p["kind"] == "zed") {
+            let original = model["zed_provider"].as_str().unwrap_or("anthropic");
+            let form = self.form.as_mut().unwrap();
+            let protocol = if matches!(original, "open_ai" | "x_ai") {
+                "responses"
+            } else {
+                "messages"
+            };
+            form.fields[2] = Field::choice(
+                "Protocolo interno (automático; salida siempre Anthropic)",
+                protocol,
+                &[protocol],
+            );
+            form.fields.push(Field::choice(
+                "Proveedor original del modelo Zed",
+                original,
+                &["anthropic", "open_ai", "google", "x_ai"],
+            ));
+        }
     }
     async fn submit(&mut self) -> Result<()> {
         let form = self.form.as_ref().context("Formulario ausente")?;
@@ -265,7 +301,8 @@ impl Panel {
                         "openai",
                         "chatgpt",
                         "google",
-                        "openai_compatible"
+                        "openai_compatible",
+                        "zed"
                     ]
                     .contains(&kind),
                     "Tipo de proveedor inválido"
@@ -275,6 +312,7 @@ impl Panel {
                         "opencode_go" => "https://opencode.ai/zen/go/v1",
                         "openai" | "chatgpt" => "https://api.openai.com/v1",
                         "google" => "https://generativelanguage.googleapis.com/v1beta/openai",
+                        "zed" => "https://cloud.zed.dev",
                         _ => anyhow::bail!("Indica el endpoint"),
                     }
                 } else {
@@ -314,7 +352,16 @@ impl Panel {
                 } else {
                     "api_key"
                 };
-                let model = json!({"id":values[0],"display_name":values[1],"protocol":values[2],"enabled":boolean(3)?,"credential":credential});
+                let mut model = json!({"id":values[0],"display_name":values[1],"protocol":values[2],"enabled":boolean(3)?,"credential":credential});
+                if self.current_provider()?["kind"] == "zed" {
+                    model["zed_provider"] = json!(values[4]);
+                    model["protocol"] =
+                        json!(if matches!(values[4].as_str(), "open_ai" | "x_ai") {
+                            "responses"
+                        } else {
+                            "messages"
+                        });
+                }
                 if let Some(i) = index {
                     next["providers"][self.provider]["models"][i] = model;
                 } else {
@@ -338,6 +385,21 @@ impl Panel {
                 } else {
                     json!(values[4])
                 };
+            }
+            Action::ZedAccount(index) => {
+                let id = text(&self.providers()[index], "id");
+                let body = json!({"user_id":values[0].parse::<u32>()?,"access_token":values[1],"organization_id":values[2],"client_version":values[3]});
+                self.client
+                    .request(
+                        reqwest::Method::POST,
+                        &format!("/api/providers/{id}/zed/credentials"),
+                        Some(&body),
+                    )
+                    .await?;
+                self.form = None;
+                self.refresh().await?;
+                self.message = "Cuenta Zed conectada".into();
+                return Ok(());
             }
             Action::TracePolicy => {
                 let enabled = boolean(0)?;
@@ -372,6 +434,13 @@ impl Panel {
                 ensure!(values[0] == "ELIMINAR", "Escribe ELIMINAR");
                 next["providers"].as_array_mut().unwrap().remove(index);
             }
+            Action::DeleteModel(index) => {
+                ensure!(values[0] == "ELIMINAR", "Escribe ELIMINAR");
+                next["providers"][self.provider]["models"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(index);
+            }
             Action::ClearTraces => {
                 ensure!(values[0] == "ELIMINAR", "Escribe ELIMINAR");
                 self.client
@@ -389,22 +458,187 @@ impl Panel {
         self.message = "Guardado en el servidor".into();
         Ok(())
     }
-    async fn action(&mut self, key: KeyCode, args: &crate::Args) -> Result<bool> {
+    fn open_menu(&mut self) {
+        use KeyCode::{Char, Enter};
+        let mut items = match self.tab {
+            0 => {
+                let mut items = vec![];
+                if self.selected < self.providers().len() {
+                    items.extend([
+                        ("Ver y elegir modelos", Enter),
+                        ("Editar conexión", Char('e')),
+                        ("Activar / desactivar proveedor", Char(' ')),
+                    ]);
+                    if self.providers()[self.selected]["kind"] == "chatgpt" {
+                        items.push(("Conectar ChatGPT en el navegador", Char('o')));
+                        items.push(("Desconectar sesión ChatGPT", Char('u')));
+                    }
+                    if self.providers()[self.selected]["kind"] == "zed" {
+                        items.push(("Conectar Zed en el navegador", Char('o')));
+                        items.push(("Introducir credenciales de Zed", Char('z')));
+                        items.push(("Desconectar cuenta Zed", Char('u')));
+                        if self.providers()[self.selected]["zed_connected"] != true {
+                            let connect =
+                                items.iter().position(|(_, key)| *key == Char('o')).unwrap();
+                            items.swap(0, connect);
+                        }
+                    } else {
+                        items.push(("Borrar API key guardada", Char('K')));
+                    }
+                    items.push(("Eliminar proveedor…", Char('d')));
+                }
+                items.push(("Añadir proveedor", Char('n')));
+                items.push(("Consultar proveedores de models.dev", Char('m')));
+                items
+            }
+            1 => {
+                let mut items = vec![];
+                if let Some((_, index)) = self.model_rows().get(self.selected) {
+                    items.extend([
+                        ("Activar / desactivar modelo", Char(' ')),
+                        ("Editar nombre y protocolo", Char('e')),
+                        ("Consultar metadatos", Enter),
+                    ]);
+                    if index.is_some() {
+                        items.push(("Usar como modelo predeterminado", Char('f')));
+                        items.push(("Retirar modelo…", Char('d')));
+                    }
+                }
+                items.extend([
+                    ("Añadir modelo manual", Char('n')),
+                    ("Buscar modelo", Char('/')),
+                ]);
+                items
+            }
+            2 => vec![
+                ("Editar preferencias", Char('e')),
+                ("Restaurar límites de contexto", Char('R')),
+            ],
+            _ => {
+                let mut items = vec![("Configurar captura de trazas", Char('e'))];
+                if !self.traces.is_empty() {
+                    items.push(("Inspeccionar traza", Enter));
+                    items.push(("Exportar página de trazas", Char('x')));
+                }
+                if self.traces.len() == 100 {
+                    items.push(("Página siguiente", Char('n')));
+                }
+                if !self.trace_cursors.is_empty() {
+                    items.push(("Página anterior", Char('p')));
+                }
+                items.push(("Borrar todas las trazas…", Char('d')));
+                items
+            }
+        };
+        items.extend([
+            ("Actualizar datos", Char('r')),
+            ("Sincronizar modelos con Claude Code", Char('s')),
+            ("Salir", Char('q')),
+        ]);
+        self.menu = Some(Menu { items, selected: 0 });
+    }
+    async fn enter_section(&mut self) -> Result<()> {
+        self.sidebar = false;
+        self.selected = 0;
+        if self.tab == 1 && !self.providers().is_empty() {
+            self.discover(false).await?;
+        } else if self.tab == 3 {
+            self.refresh().await?;
+        }
+        Ok(())
+    }
+    fn operation(&self, key: KeyCode) -> Option<&'static str> {
+        if self.help || self.detail.is_some() || self.filtering {
+            return None;
+        }
+        if let Some(form) = &self.form {
+            return (key == KeyCode::Enter && form.selected == form.fields.len())
+                .then_some("Guardando en el servidor…");
+        }
+        if self.sidebar {
+            return (matches!(key, KeyCode::Enter | KeyCode::Right | KeyCode::Tab)
+                && matches!(self.tab, 1 | 3))
+            .then_some("Consultando datos del servidor…");
+        }
+        let key = if let Some(menu) = &self.menu {
+            if key != KeyCode::Enter {
+                return None;
+            }
+            menu.items[menu.selected].1
+        } else {
+            if key == KeyCode::Enter {
+                return None;
+            }
+            key
+        };
+        match key {
+            KeyCode::Enter if self.tab == 0 => Some("Consultando catálogo de modelos…"),
+            KeyCode::Char('s') => Some("Sincronizando modelos con Claude Code…"),
+            KeyCode::Char('r' | 'm' | 'o' | 'u' | 'K' | ' ' | 'f' | 'R' | 'x') => {
+                Some("Procesando la acción seleccionada…")
+            }
+            KeyCode::Char('n' | 'p') if self.tab == 3 => Some("Consultando página de trazas…"),
+            _ => None,
+        }
+    }
+    async fn action(&mut self, mut key: KeyCode, args: &crate::Args) -> Result<bool> {
+        if self.help {
+            if matches!(
+                key,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::F(1) | KeyCode::Char('?')
+            ) {
+                self.help = false;
+            }
+            return Ok(false);
+        }
+        if key == KeyCode::F(1)
+            || (key == KeyCode::Char('?') && self.form.is_none() && !self.filtering)
+        {
+            self.help = true;
+            return Ok(false);
+        }
         if let Some(form) = &mut self.form {
+            let buttons = if self.configured { 2 } else { 1 };
+            let count = form.fields.len() + buttons;
             match key {
                 KeyCode::Esc if self.configured => self.form = None,
-                KeyCode::Tab | KeyCode::Down => {
-                    form.selected = (form.selected + 1) % form.fields.len()
-                }
+                KeyCode::Tab | KeyCode::Down => form.selected = (form.selected + 1) % count,
                 KeyCode::BackTab | KeyCode::Up => {
-                    form.selected = (form.selected + form.fields.len() - 1) % form.fields.len()
+                    form.selected = (form.selected + count - 1) % count
                 }
-                KeyCode::Char(c) => form.fields[form.selected].value.push(c),
-                KeyCode::Backspace => {
-                    form.fields[form.selected].value.pop();
+                KeyCode::Enter if form.selected < form.fields.len() => {
+                    form.selected += 1;
                 }
-                KeyCode::Enter => self.submit().await?,
-                _ => {}
+                KeyCode::Enter if form.selected == form.fields.len() => self.submit().await?,
+                KeyCode::Enter => self.form = None,
+                _ => {
+                    if let Some(field) = form.fields.get_mut(form.selected) {
+                        field.edit(key);
+                    }
+                    if matches!(form.action, Action::Model(_)) && form.fields.len() == 5 {
+                        let protocol =
+                            if matches!(form.fields[4].value.as_str(), "open_ai" | "x_ai") {
+                                "responses"
+                            } else {
+                                "messages"
+                            };
+                        form.fields[2].value = protocol.into();
+                        form.fields[2].choices = vec![protocol];
+                    }
+                    if matches!(form.action, Action::Provider(_)) {
+                        if form.fields[2].value == "zed" {
+                            form.fields[4] = Field::choice(
+                                "Cuenta Zed: conectar desde el menú del proveedor",
+                                "",
+                                &[""],
+                            );
+                        } else {
+                            form.fields[4].label = "API key (vacío: conservar)";
+                            form.fields[4].choices.clear();
+                            form.fields[4].secret = true;
+                        }
+                    }
+                }
             }
             return Ok(false);
         }
@@ -434,23 +668,75 @@ impl Panel {
             self.selected = 0;
             return Ok(false);
         }
+        if let Some(menu) = &mut self.menu {
+            match key {
+                KeyCode::Esc | KeyCode::Left => {
+                    self.menu = None;
+                    return Ok(false);
+                }
+                KeyCode::Down => {
+                    menu.selected = (menu.selected + 1) % menu.items.len();
+                    return Ok(false);
+                }
+                KeyCode::Up => {
+                    menu.selected = (menu.selected + menu.items.len() - 1) % menu.items.len();
+                    return Ok(false);
+                }
+                KeyCode::Home => {
+                    menu.selected = 0;
+                    return Ok(false);
+                }
+                KeyCode::End => {
+                    menu.selected = menu.items.len() - 1;
+                    return Ok(false);
+                }
+                KeyCode::Enter => {
+                    key = menu.items[menu.selected].1;
+                    self.menu = None;
+                }
+                _ => return Ok(false),
+            }
+        } else {
+            if self.sidebar {
+                match key {
+                    KeyCode::Down => {
+                        self.tab = (self.tab + 1) % 4;
+                        self.selected = 0;
+                    }
+                    KeyCode::Up => {
+                        self.tab = (self.tab + 3) % 4;
+                        self.selected = 0;
+                    }
+                    KeyCode::Enter | KeyCode::Right | KeyCode::Tab => self.enter_section().await?,
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
+                    _ => {}
+                }
+                return Ok(false);
+            }
+            match key {
+                KeyCode::Enter | KeyCode::Right | KeyCode::F(2) => {
+                    self.open_menu();
+                    return Ok(false);
+                }
+                KeyCode::Esc | KeyCode::Left | KeyCode::BackTab | KeyCode::Tab => {
+                    self.sidebar = true;
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
         match key {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
-            KeyCode::Tab | KeyCode::Right => {
-                self.tab = (self.tab + 1) % 4;
-                self.selected = 0;
-                if self.tab == 3 {
-                    self.refresh().await?;
-                }
-            }
-            KeyCode::BackTab | KeyCode::Left => {
-                self.tab = (self.tab + 3) % 4;
-                self.selected = 0;
-            }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected = (self.selected + 1).min(self.length().saturating_sub(1))
             }
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = self.length().saturating_sub(1),
+            KeyCode::PageDown => {
+                self.selected = (self.selected + 10).min(self.length().saturating_sub(1))
+            }
+            KeyCode::PageUp => self.selected = self.selected.saturating_sub(10),
             KeyCode::Char('r') => {
                 self.refresh().await?;
                 if self.tab == 1 {
@@ -465,6 +751,7 @@ impl Panel {
                 self.tab = 1;
                 self.selected = 0;
                 self.catalog.clear();
+                self.filter.clear();
                 self.discover(false).await?;
             }
             KeyCode::Char('e') if self.tab == 0 && self.selected < self.providers().len() => {
@@ -531,36 +818,64 @@ impl Panel {
             }
             KeyCode::Char('d') if self.tab == 1 => {
                 if let Some((_, Some(index))) = self.model_rows().get(self.selected).cloned() {
-                    let mut next = self.settings.clone();
-                    next["providers"][self.provider]["models"]
-                        .as_array_mut()
-                        .unwrap()
-                        .remove(index);
-                    self.client.put_settings(&next).await?;
-                    self.settings = self.client.get("/api/settings").await?;
+                    self.form = Some(Form {
+                        title: "Retirar modelo · se quitará de Claude Code al sincronizar",
+                        fields: vec![Field::new("Escribe ELIMINAR para confirmar", "")],
+                        selected: 0,
+                        action: Action::DeleteModel(index),
+                    });
                 }
             }
             KeyCode::Char('o') if self.tab == 0 && self.selected < self.providers().len() => {
                 let id = text(&self.providers()[self.selected], "id");
+                let resource = if self.providers()[self.selected]["kind"] == "zed" {
+                    "zed/auth"
+                } else {
+                    "oauth"
+                };
                 let result = self
                     .client
                     .request(
                         reqwest::Method::POST,
-                        &format!("/api/providers/{id}/oauth"),
+                        &format!("/api/providers/{id}/{resource}"),
                         Some(&json!({})),
                     )
                     .await?;
                 let url = result["url"].as_str().context("Falta URL OAuth")?;
                 let _ = webbrowser::open(url);
                 self.detail = Some(format!(
-                    "Completa la conexión en el navegador y pulsa r al volver.\n\n{url}"
+                    "Completa la conexión en el navegador. Debe poder acceder al puerto REST del servidor en 127.0.0.1.\n\nVuelve a Proveedores y elige Actualizar datos.\n\n{url}"
                 ));
+            }
+            KeyCode::Char('z')
+                if self.tab == 0
+                    && self.selected < self.providers().len()
+                    && self.providers()[self.selected]["kind"] == "zed" =>
+            {
+                let mut token = Field::new("Token de cuenta Zed (no token LLM temporal)", "");
+                token.secret = true;
+                self.form = Some(Form {
+                    title: "Conectar cuenta Zed · credenciales guardadas en el servidor",
+                    fields: vec![
+                        Field::new("ID numérico de usuario Zed", ""),
+                        token,
+                        Field::new("Organización (vacío: predeterminada de la cuenta)", ""),
+                        Field::new(
+                            "Versión de cliente (vacío: predeterminada del adaptador)",
+                            "",
+                        ),
+                    ],
+                    selected: 0,
+                    action: Action::ZedAccount(self.selected),
+                });
             }
             KeyCode::Char('u') | KeyCode::Char('K')
                 if self.tab == 0 && self.selected < self.providers().len() =>
             {
                 let id = text(&self.providers()[self.selected], "id");
-                let resource = if key == KeyCode::Char('K') {
+                let resource = if self.providers()[self.selected]["kind"] == "zed" {
+                    "zed/credentials"
+                } else if key == KeyCode::Char('K') {
                     "api-key"
                 } else {
                     "oauth"
@@ -635,11 +950,12 @@ impl Panel {
                 self.form = Some(Form {
                     title: "Trazas · contenido completo requiere consentimiento por 1 hora",
                     fields: vec![
-                        Field::new(
-                            "Habilitado: true / false",
+                        Field::choice(
+                            "Capturar trazas",
                             self.settings["traces"]["enabled"]
                                 .as_bool()
                                 .unwrap_or(false),
+                            &["false", "true"],
                         ),
                         Field::new(
                             "Retención: 1 a 168 horas",
@@ -692,126 +1008,18 @@ impl Panel {
                     SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
                 ));
                 std::fs::write(&path, serde_json::to_vec_pretty(&self.traces)?)?;
-                self.message = format!("Exportadas las 100 trazas visibles: {}", path.display());
+                self.message = format!(
+                    "Exportadas {} trazas: {}",
+                    self.traces.len(),
+                    path.display()
+                );
             }
             _ => {}
         }
         Ok(false)
     }
-    fn draw(&self, frame: &mut Frame) {
-        let areas = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(4),
-            Constraint::Length(4),
-        ])
-        .split(frame.area());
-        let tabs = ["Proveedores", "Modelos", "Preferencias", "Trazas"]
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                if i == self.tab {
-                    format!("[ {t} ]")
-                } else {
-                    t.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("   ");
-        frame.render_widget(
-            Paragraph::new(tabs)
-                .block(Block::bordered().title(format!("claude-proxy · {}", self.client.endpoint)))
-                .style(Style::default().fg(Color::Cyan)),
-            areas[0],
-        );
-        if let Some(form) = &self.form {
-            let rows = form
-                .fields
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    let value = if f.secret {
-                        "•".repeat(f.value.chars().count())
-                    } else {
-                        f.value.clone()
-                    };
-                    ListItem::new(format!(
-                        "{}\n  {}{}\n",
-                        f.label,
-                        value,
-                        if i == form.selected { "▏" } else { "" }
-                    ))
-                    .style(if i == form.selected {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default()
-                    })
-                })
-                .collect::<Vec<_>>();
-            let mut state = ListState::default().with_selected(Some(form.selected));
-            frame.render_stateful_widget(
-                List::new(rows).block(Block::bordered().title(form.title)),
-                areas[1],
-                &mut state,
-            );
-        } else if let Some(detail) = &self.detail {
-            frame.render_widget(
-                Paragraph::new(detail.as_str())
-                    .wrap(Wrap { trim: false })
-                    .scroll((self.scroll, 0))
-                    .block(Block::bordered().title("Detalle · ↑↓ / PgUp PgDn · Esc cerrar")),
-                areas[1],
-            );
-        } else if self.tab == 2 {
-            let settings = &self.settings;
-            let content = format!(
-                "Modelo predeterminado: {}\nContexto: {}\nCompactación: {}\nTimeout: {} s\nURL Anthropic: {}\n\ne editar · R restaurar límites · s sincronizar Claude Code",
-                text(settings, "default_model"),
-                number(settings, "context_tokens"),
-                number(settings, "compact_tokens"),
-                number(settings, "timeout_seconds"),
-                text(settings, "public_url")
-            );
-            frame.render_widget(
-                Paragraph::new(content)
-                    .block(Block::bordered().title("Preferencias del servidor"))
-                    .wrap(Wrap { trim: false }),
-                areas[1],
-            );
-        } else {
-            let (title, rows): (String, Vec<String>) = match self.tab {
-                0 => ("Conexiones · n nueva · e editar · Enter modelos · o OAuth · u desconectar · K borrar clave · d eliminar · m models.dev".into(),self.providers().iter().map(|p| format!("{}  {}  {}  {}",if p["enabled"] == true { "●" } else { "○" },text(p,"name"),text(p,"kind"),if p["subscription_connected"] == true { "sesión conectada" } else if p["has_api_key"] == true { "clave guardada" } else { "sin credencial" })).collect()),
-                1 => (format!("{} · / filtrar: {} · espacio activar · f predeterminado · n manual · e editar · d retirar · Enter metadatos",self.providers().get(self.provider).map(|p| text(p,"name")).unwrap_or_default(),self.filter),self.model_rows().iter().map(|(m,_)| format!("{}  {}  {}",if m["enabled"] == true { "●" } else { "○" },text(m,"id"),text(m,"protocol"))).collect()),
-                _ => (format!("Trazas · n/p páginas · e configurar · Enter detalle · x exportar · d borrar · captura {}",if self.settings["traces"]["enabled"] == true { "activa" } else { "desactivada" }),self.traces.iter().map(|t| format!("{}  {}  {}  eventos omitidos: {}",text(t,"id"),number(t,"created"),text(t,"outcome"),number(t,"dropped_events"))).collect()),
-            };
-            let rows = if rows.is_empty() {
-                vec!["Sin elementos. Añade un proveedor con n o actualiza con r.".into()]
-            } else {
-                rows
-            };
-            let list = List::new(rows)
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .highlight_style(
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("› ");
-            let mut state = ListState::default().with_selected(Some(self.selected));
-            frame.render_stateful_widget(list, areas[1], &mut state);
-        }
-        let help = if self.form.is_some() {
-            "Tab campos · Enter guardar · Esc cancelar · Ctrl+C salir"
-        } else {
-            "Tab / ←→ pestañas · ↑↓ navegar · r actualizar · s sincronizar Claude Code · q salir"
-        };
-        frame.render_widget(
-            Paragraph::new(format!("{help}\n{}", self.message))
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered()),
-            areas[2],
-        );
-    }
 }
+
 fn text(v: &Value, k: &str) -> String {
     v[k].as_str().unwrap_or("").into()
 }
@@ -837,15 +1045,32 @@ pub async fn run(client: Client, args: &crate::Args) -> Result<()> {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     break;
                 }
+                let size = terminal.size()?;
+                if size.width < 80 || size.height < 24 {
+                    continue;
+                }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-                    if let Some(form) = &mut panel.form {
-                        form.fields[form.selected].value.clear();
+                    if !panel.help
+                        && let Some(form) = &mut panel.form
+                        && let Some(field) = form.fields.get_mut(form.selected)
+                        && field.choices.is_empty()
+                    {
+                        field.value.clear();
+                        field.cursor = 0;
                     }
                     continue;
                 }
+                if let Some(message) = panel.operation(key.code) {
+                    panel.message = message.into();
+                    terminal.draw(|frame| panel.draw(frame))?;
+                }
                 match panel.action(key.code, args).await {
                     Ok(true) => break,
-                    Ok(false) => {}
+                    Ok(false) => {
+                        if panel.message.ends_with('…') {
+                            panel.message = "Listo".into();
+                        }
+                    }
                     Err(e) => panel.message = format!("Error: {e:#}"),
                 }
             }
@@ -860,9 +1085,10 @@ pub async fn run(client: Client, args: &crate::Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn renders_empty_panel_without_credentials() {
-        let panel = Panel {
+    use clap::Parser;
+
+    fn panel() -> Panel {
+        Panel {
             client: Client::new("http://127.0.0.1:10801").unwrap(),
             settings: json!({"providers":[]}),
             catalog: vec![],
@@ -878,10 +1104,86 @@ mod tests {
             message: String::new(),
             configured: true,
             trace_cursors: vec![],
-        };
+            sidebar: true,
+            menu: None,
+            help: false,
+        }
+    }
+    #[test]
+    fn renders_empty_panel_without_credentials() {
+        let panel = panel();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 25)).unwrap();
         terminal.draw(|f| panel.draw(f)).unwrap();
         assert_eq!(panel.length(), 0);
+    }
+
+    #[tokio::test]
+    async fn arrows_and_enter_open_actions_and_advance_fields_without_saving() {
+        let mut panel = panel();
+        let args = crate::Launch::try_parse_from(["claude-proxy"])
+            .unwrap()
+            .args;
+        panel.action(KeyCode::Enter, &args).await.unwrap();
+        assert!(!panel.sidebar);
+        panel.action(KeyCode::Enter, &args).await.unwrap();
+        assert_eq!(panel.menu.as_ref().unwrap().items[0].0, "Añadir proveedor");
+        panel.action(KeyCode::Enter, &args).await.unwrap();
+        assert!(panel.form.is_some());
+        for key in [KeyCode::Char('a'), KeyCode::Enter, KeyCode::Enter] {
+            panel.action(key, &args).await.unwrap();
+        }
+        let form = panel.form.as_ref().unwrap();
+        assert_eq!(form.selected, 2);
+        assert_eq!(form.fields[0].value, "a");
+        assert!(panel.providers().is_empty());
+        panel.action(KeyCode::Left, &args).await.unwrap();
+        assert_eq!(panel.form.as_ref().unwrap().fields[2].value, "google");
+        panel.form.as_mut().unwrap().selected = 8; // Cancelar, after seven fields + Guardar.
+        panel.action(KeyCode::Enter, &args).await.unwrap();
+        assert!(panel.form.is_none());
+        panel.action(KeyCode::Esc, &args).await.unwrap();
+        assert!(panel.sidebar);
+        panel.action(KeyCode::Down, &args).await.unwrap();
+        assert_eq!(panel.tab, 1);
+    }
+
+    #[test]
+    fn text_cursor_handles_unicode_delete_and_secret_values() {
+        let mut field = Field::new("Clave", "á🔑z");
+        field.secret = true;
+        field.edit(KeyCode::Left);
+        field.edit(KeyCode::Backspace);
+        field.edit(KeyCode::Char('ñ'));
+        assert_eq!(field.value, "áñz");
+        field.edit(KeyCode::Home);
+        field.edit(KeyCode::Delete);
+        assert_eq!(field.value, "ñz");
+        assert_eq!(field.display(true), "▏••");
+        let mut choice = Field::choice("Habilitado", true, &["true", "false"]);
+        choice.edit(KeyCode::Char('x'));
+        assert_eq!(choice.value, "true");
+        choice.edit(KeyCode::Right);
+        assert_eq!(choice.value, "false");
+        assert!(choice.display(true).contains("No"));
+    }
+
+    #[tokio::test]
+    async fn help_and_action_menu_cancel_preserve_selection() {
+        let mut panel = panel();
+        let args = crate::Launch::try_parse_from(["claude-proxy"])
+            .unwrap()
+            .args;
+        panel.sidebar = false;
+        panel.action(KeyCode::Enter, &args).await.unwrap();
+        panel.action(KeyCode::End, &args).await.unwrap();
+        panel.action(KeyCode::F(1), &args).await.unwrap();
+        assert!(panel.help);
+        panel.action(KeyCode::Esc, &args).await.unwrap();
+        assert!(!panel.help);
+        assert!(panel.menu.is_some());
+        panel.action(KeyCode::Esc, &args).await.unwrap();
+        assert!(panel.menu.is_none());
+        assert!(!panel.sidebar);
     }
 }

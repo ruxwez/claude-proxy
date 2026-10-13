@@ -368,6 +368,7 @@ dependencies = [
  "futures-util",
  "jsonwebtoken",
  "reqwest",
+ "rsa",
  "rusqlite",
  "serde",
  "serde_json",

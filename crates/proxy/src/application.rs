@@ -69,8 +69,15 @@ impl Application {
                 }
                 // Browser updates never replace server-managed OAuth credentials.
                 p.subscription = old.subscription.clone();
+                // Zed account credentials are never accepted through settings round-trips.
+                p.zed = if p.base_url == old.base_url {
+                    old.zed.clone()
+                } else {
+                    None
+                };
             } else {
                 p.subscription = None;
+                p.zed = None;
             }
         }
         self.save(settings).await

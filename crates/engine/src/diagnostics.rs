@@ -47,6 +47,27 @@ pub fn observe(value: &Value) -> Value {
                 if o.contains_key("reasoning_content") || o.contains_key("encrypted_content") {
                     counts[2] += 1;
                 }
+                if o.contains_key("functionCall") {
+                    counts[0] += 1;
+                }
+                if o.contains_key("functionResponse") {
+                    counts[1] += 1;
+                }
+                if o.get("thought") == Some(&Value::Bool(true))
+                    || o.contains_key("thoughtSignature")
+                {
+                    counts[2] += 1;
+                }
+                if let Some(data) = o.get("inlineData") {
+                    if data["mimeType"]
+                        .as_str()
+                        .is_some_and(|mime| mime.starts_with("image/"))
+                    {
+                        counts[3] += 1;
+                    } else {
+                        counts[4] += 1;
+                    }
+                }
                 if let Some(s) = o.get("text").and_then(Value::as_str) {
                     counts[5] += s.chars().count() as u64;
                 }
@@ -107,6 +128,16 @@ pub fn observe(value: &Value) -> Value {
             .or_else(|| value["response"]["usage"][key].as_u64());
         if let Some(tokens) = tokens {
             usage.insert(key.into(), json!(tokens));
+        }
+    }
+    for (source, dest) in [
+        ("promptTokenCount", "input_tokens"),
+        ("candidatesTokenCount", "output_tokens"),
+        ("cachedContentTokenCount", "cache_read_input_tokens"),
+        ("thoughtsTokenCount", "reasoning_tokens"),
+    ] {
+        if let Some(tokens) = value["usageMetadata"][source].as_u64() {
+            usage.insert(dest.into(), json!(tokens));
         }
     }
     json!({"bytes":value.to_string().len(),"event":event,"delta":delta,"index":value["index"].as_u64(),"output_index":value["output_index"].as_u64(),"usage":usage,"tool_calls":counts[0],
@@ -237,6 +268,18 @@ pub fn compare_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn google_observations_count_native_tools_thoughts_media_and_tokens_without_content() {
+        let raw = json!({"contents":[{"parts":[{"functionCall":{"name":"private-tool","args":{"q":"private-input"}}},{"functionResponse":{"name":"private-tool","response":{"text":"private-result"}}},{"thought":true,"text":"private-thought","thoughtSignature":"private-signature"},{"inlineData":{"mimeType":"image/png","data":"private-image"}},{"inlineData":{"mimeType":"application/pdf","data":"private-file"}}]}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":3,"cachedContentTokenCount":5,"thoughtsTokenCount":7}});
+        let observation = observe(&raw);
+        assert_eq!(observation["tool_calls"], 1);
+        assert_eq!(observation["tool_results"], 1);
+        assert_eq!(observation["reasoning_blocks"], 1);
+        assert_eq!(observation["images"], 1);
+        assert_eq!(observation["files"], 1);
+        assert_eq!(observation["usage"]["reasoning_tokens"], 7);
+        assert!(!observation.to_string().contains("private"));
+    }
     #[test]
     fn metadata_cannot_leak_user_values_or_custom_event_types() {
         let value = json!({"type":"secret-event", "prompt":"secret-prompt", "tool_calls":[{"id":"secret-id"}], "reasoning_content":"private-thought"});

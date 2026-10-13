@@ -24,6 +24,114 @@ fn error_frame(message: &str) -> Bytes {
     frame(&json!({"type":"error","error":{"type":"api_error","message":message}}))
 }
 
+pub async fn zed_response(
+    upstream: reqwest::Response,
+    provider: claude_proxy_engine::zed::Provider,
+    model: String,
+    req: &Value,
+    capture: Option<crate::traces::Capture>,
+) -> Result<Response> {
+    let streaming = req["stream"].as_bool().unwrap_or(false);
+    let translator = claude_proxy_engine::zed::Stream::new(provider, &model, req)?;
+    let wrapped = upstream
+        .headers()
+        .contains_key("x-zed-server-supports-status-messages");
+    let failure_capture = capture.clone();
+    let source = async_stream::try_stream! {
+        if let Some(trace) = &capture { trace.finish("cancelled"); }
+        let mut translator = translator;
+        for event in translator.start() {
+            if let Some(trace) = &capture { trace.stage("client_event", &event); }
+            yield event;
+        }
+        let mut decoder = claude_proxy_engine::zed::Decoder::new(wrapped);
+        let mut source = upstream.bytes_stream();
+        let period = Duration::from_secs(15);
+        let mut keepalive = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let chunk = tokio::select! {
+                chunk = source.next() => chunk,
+                _ = keepalive.tick() => { yield json!({"type":"ping"}); continue; }
+            };
+            let eof = chunk.is_none();
+            let bytes = chunk.transpose()?.unwrap_or_default();
+            for raw in decoder.push(&bytes, eof)? {
+                if let Some(trace) = &capture { trace.stage("upstream_event", &raw); }
+                for event in translator.accept(&raw)? {
+                    if let Some(trace) = &capture { trace.stage("client_event", &event); }
+                    if event["type"] == "error" { Err(anyhow::anyhow!("Zed: {}", event["error"]["message"].as_str().unwrap_or("error del proveedor")))?; }
+                    yield event;
+                }
+            }
+            if eof { break; }
+        }
+        for event in translator.finish()? {
+            if let Some(trace) = &capture { trace.stage("client_event", &event); }
+            yield event;
+        }
+        if let Some(trace) = &capture { trace.finish("completed"); }
+    };
+    if streaming {
+        let body = Body::from_stream(source.map(move |result: Result<Value>| {
+            Ok::<_, Infallible>(match result {
+                Ok(value) => frame(&value),
+                Err(error) => {
+                    if let Some(trace) = &failure_capture {
+                        trace.finish("stream_error");
+                    }
+                    error_frame(&format!("{error:#}"))
+                }
+            })
+        }));
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "text/event-stream"),
+                (header::CACHE_CONTROL, "no-cache"),
+                (header::HeaderName::from_static("x-accel-buffering"), "no"),
+            ],
+            body,
+        )
+            .into_response());
+    }
+    let mut collector = claude_proxy_engine::zed::Collector::default();
+    let mut size = 0;
+    futures_util::pin_mut!(source);
+    while let Some(event) = source.next().await {
+        let event: Value = match event {
+            Ok(event) => event,
+            Err(error) => {
+                if let Some(trace) = &failure_capture {
+                    trace.finish("stream_error");
+                }
+                return Err(error);
+            }
+        };
+        size += serde_json::to_vec(&event)?.len();
+        if size > 32 * 1024 * 1024 {
+            if let Some(trace) = &failure_capture {
+                trace.finish("conversion_error");
+            }
+            anyhow::bail!("Respuesta Zed demasiado grande");
+        }
+        if let Err(error) = collector.accept(&event) {
+            if let Some(trace) = &failure_capture {
+                trace.finish("conversion_error");
+            }
+            return Err(error);
+        }
+    }
+    let result = collector.finish().inspect_err(|_| {
+        if let Some(trace) = &failure_capture {
+            trace.finish("conversion_error");
+        }
+    })?;
+    if let Some(trace) = &failure_capture {
+        trace.stage("client_response", &result);
+    }
+    Ok(axum::Json(result).into_response())
+}
+
 #[cfg(test)]
 pub fn response(
     upstream: reqwest::Response,

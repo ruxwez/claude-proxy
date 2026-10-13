@@ -293,13 +293,34 @@ async fn messages(
     }
     let started = Instant::now();
     tracing::info!(model = id, ?protocol, "Enviando petición al proveedor");
-    let mut body =
-        translate::request(&req, target, protocol).map_err(|e| ApiError::Invalid(e.to_string()))?;
-    let mut warnings = translate::warnings(&req, target, protocol);
+    let zed_provider = p
+        .config
+        .zed
+        .as_ref()
+        .map(|z| {
+            z.models
+                .get(target)
+                .copied()
+                .context("Modelo Zed sin proveedor original")
+        })
+        .transpose()?;
+    let mut body = if let Some(provider) = zed_provider {
+        claude_proxy_engine::zed::request(&req, target, provider)
+    } else {
+        translate::request(&req, target, protocol)
+    }
+    .map_err(|e| ApiError::Invalid(e.to_string()))?;
+    let mut warnings = if let Some(provider) = zed_provider {
+        claude_proxy_engine::zed::warnings(&req, target, provider)
+    } else {
+        translate::warnings(&req, target, protocol)
+    };
     if proxy.subscriptions.contains(&p.config.name) {
         translate::adapt_subscription_request(&mut body, &mut warnings);
     }
-    if protocol != Protocol::Messages && headers.contains_key("anthropic-beta") {
+    if (protocol != Protocol::Messages || zed_provider.is_some())
+        && headers.contains_key("anthropic-beta")
+    {
         warnings.push("anthropic_beta_not_transferable");
     }
     if !warnings.is_empty() {
@@ -310,12 +331,7 @@ async fn messages(
         trace.warnings(&warnings);
         trace.finish("transport_error");
     }
-    let upstream = p
-        .post(protocol, &headers)
-        .json(&body)
-        .send()
-        .await
-        .context("Proveedor no alcanzable")?;
+    let upstream = p.send(protocol, &headers, &body).await?;
     tracing::info!(model = id, status = %upstream.status(), elapsed_ms = started.elapsed().as_millis(), "Cabeceras del proveedor recibidas");
     if let Some(trace) = &capture {
         trace.transport(upstream.status().as_u16(), started.elapsed().as_millis());
@@ -349,7 +365,9 @@ async fn messages(
         return Ok(response);
     }
     let upstream_headers = upstream.headers().clone();
-    let mut response = if req["stream"].as_bool().unwrap_or(false) {
+    let mut response = if let Some(provider) = zed_provider {
+        stream::zed_response(upstream, provider, id.to_string(), &req, capture.clone()).await?
+    } else if req["stream"].as_bool().unwrap_or(false) {
         stream::response_traced(upstream, protocol, id.to_string(), &req, capture.clone())
     } else {
         let raw: Value = serde_json::from_slice(&read_limited(upstream, 32 * 1024 * 1024).await?)
@@ -425,7 +443,7 @@ async fn count_tokens(
     if let Some(id) = req["model"].as_str() {
         let (provider, model) = find_provider(&proxy, id)?;
         let protocol = selected_protocol(&provider.config.name, model, &proxy.protocols);
-        if protocol != Protocol::Chat {
+        if protocol != Protocol::Chat && provider.config.zed.is_none() {
             let body = translate::count_request(
                 &req,
                 model,
@@ -535,6 +553,14 @@ pub fn configured_router_with_traces(
             )
         };
         providers.push(ProviderConfig {
+            zed: (p.kind == ProviderKind::Zed).then(|| crate::zed::Config {
+                credentials: p.zed.clone(),
+                models: p
+                    .models
+                    .iter()
+                    .filter_map(|m| m.zed_provider.map(|kind| (m.id.clone(), kind)))
+                    .collect(),
+            }),
             opencode: p.kind == ProviderKind::OpencodeGo,
             name: p.id.clone(),
             base,

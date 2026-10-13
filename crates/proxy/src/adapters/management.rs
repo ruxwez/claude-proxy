@@ -68,6 +68,12 @@ pub fn router_with_control(app: Arc<Control>) -> Router {
         )
         .route("/api/providers/{id}/api-key", delete(clear_key))
         .route("/auth/callback", get(callback))
+        .route("/", get(zed_callback))
+        .route("/api/providers/{id}/zed/auth", post(zed_start))
+        .route(
+            "/api/providers/{id}/zed/credentials",
+            post(zed_connect).delete(zed_disconnect),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), protect))
         .with_state(app)
@@ -226,6 +232,9 @@ async fn settings(State(app): State<Arc<Control>>) -> Json<Value> {
         p["subscription"] = Value::Null;
         p["subscription_account"] = json!(stored.subscription.as_ref().map(|s| &s.email));
         p["subscription_connected"] = json!(stored.subscription.is_some());
+        p["zed"] = Value::Null;
+        p["zed_connected"] = json!(stored.zed.is_some());
+        p["zed_organization"] = json!(stored.zed.as_ref().map(|s| &s.organization_id));
     }
     Json(value)
 }
@@ -268,6 +277,9 @@ async fn provider_catalog(
     }
     // OAuth credentials are exclusively managed on the server, including discovery.
     request.provider.subscription = stored.and_then(|p| p.subscription.clone());
+    request.provider.zed = stored
+        .filter(|p| p.base_url == request.provider.base_url)
+        .and_then(|p| p.zed.clone());
     crate::catalog::CATALOG
         .discover(&request.provider, credential, request.refresh)
         .await
@@ -287,6 +299,57 @@ async fn metadata_providers() -> Result<Json<Value>, Failure> {
         .collect();
     providers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     Ok(Json(json!({"data":providers})))
+}
+
+async fn zed_start(
+    State(app): State<Arc<Control>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Failure> {
+    let port = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|host| reqwest::Url::parse(&format!("http://{host}")).ok())
+        .and_then(|url| url.port())
+        .unwrap_or(10801);
+    crate::zed::start(&app, &id, port)
+        .await
+        .map(|url| Json(json!({"url":url})))
+        .map_err(failure)
+}
+async fn zed_connect(
+    State(app): State<Arc<Control>>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::zed::AccountInput>,
+) -> Result<Json<Value>, Failure> {
+    crate::zed::connect(&app, &id, input)
+        .await
+        .map_err(failure)?;
+    Ok(Json(json!({"connected":true})))
+}
+async fn zed_disconnect(
+    State(app): State<Arc<Control>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Failure> {
+    crate::zed::disconnect(&app, &id).await.map_err(failure)?;
+    Ok(Json(json!({"disconnected":true,"remote_revoked":false})))
+}
+async fn zed_callback(
+    State(app): State<Arc<Control>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(user_id) = query.get("user_id").and_then(|v| v.parse::<u32>().ok()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(token) = query.get("access_token") else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match crate::zed::callback(&app, user_id, token).await {
+        Ok(()) => {
+            "Cuenta Zed conectada. Vuelve al CLI y actualiza los proveedores.".into_response()
+        }
+        Err(error) => failure(error).into_response(),
+    }
 }
 async fn cli_config(State(app): State<Arc<Control>>, headers: HeaderMap) -> Json<Value> {
     let settings = app.settings();

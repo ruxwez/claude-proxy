@@ -30,6 +30,73 @@ y directories, y los flags específicos Unix están protegidos con `cfg(unix)`.
 La prueba remota se omite en la suite ordinaria si no se pide explícitamente
 `--include-ignored` o `--ignored`. Sus DSN deben apuntar a bases desechables.
 
+### Navegación del TUI con flechas y Enter
+
+Revisión posterior del panel, tomando como referencia la interacción de
+`quatum-migrator`: menú lateral, acciones contextuales, selectores, botones
+explícitos y ayuda. Se verifican por separado estas modificaciones de la CLI:
+
+- `cargo test -p cli --locked`: 13 pruebas correctas, incluyendo navegación sin
+  guardar accidentalmente, cancelación de menús/ayuda y edición Unicode de claves.
+- `cargo clippy -p cli --all-targets --locked -- -D warnings` y formato: correctos.
+- `scripts/verify_tui.py`: recorrido real en PTY usando flechas y Enter, sin
+  atajos de letras para añadir proveedor, modelo, sincronizar o configurar trazas.
+  Comprueba además selección de protocolo, credenciales ocultas, persistencia
+  tras reinicio y restauración del terminal.
+
+Estas comprobaciones se ejecutan en Linux y no sustituyen la validación nativa
+de Windows pendiente por la limitación del host descrita arriba.
+
+### Adaptador Zed nativo
+
+Verificado el 13 de octubre de 2026 en el contenedor desechable de validación,
+con endpoints HTTP simulados y una base SQLite temporal:
+
+- `cargo test --workspace --locked`: 92 pruebas correctas (26 motor, 53 servidor,
+  13 CLI); una prueba de PostgreSQL/MySQL omitida porque requiere sus DSN desechables.
+- Conversión de Anthropic, OpenAI, xAI y Google desde `/completions` a
+  `/v1/messages`, tanto JSON como SSE; IDs públicos, firmas, herramientas y caché.
+- NDJSON fragmentado en cada byte, Unicode, CRLF, BOM, estados de cola/fallo,
+  límites por línea y ausencia de `stream_ended`. Un corte no emite `message_stop`.
+- Intercambio de token por organización, renovación tras 401, reutilización y
+  ocho peticiones simultáneas compartiendo una única renovación.
+- Autenticación nativa con RSA/OAEP, formato PKCS1/base64url del enlace Zed,
+  callback de un solo uso, rechazo de callbacks ajenos y almacenamiento persistente.
+- API de administración sin credenciales, conservación frente a un roundtrip
+  manipulado, descubrimiento de catálogo y desconexión durable.
+- Estado Google opaco con firmas y IDs de llamadas, partes de firma aisladas,
+  rechazo explícito de controles no representables y observaciones sin contenido.
+- Clippy con `-D warnings`, formato y build del workspace correctos.
+- PTY real: alta Zed, credencial oculta, conexión, catálogo, activación de Claude,
+  protocolo interno automático, reinicio y restauración del terminal mediante
+  flechas y Enter. Continúan pasando los recorridos anteriores del panel.
+
+La comprobación no utiliza una cuenta real de Zed ni consume cuota. No confirma
+la disponibilidad de modelos en una suscripción concreta. El contenedor de
+producción no se sustituye durante estas pruebas.
+
+### Regresión del esquema Anthropic de Zed
+
+El error real `unknown variant system, expected user or assistant` mostró que
+el simulador aceptaba JSON que los structs de Zed rechazan. Se restringe ahora
+el fixture a esos dos roles y a contenido como lista de bloques. El adaptador
+mueve los mensajes `system` al campo superior, conserva el sistema existente y
+sus marcadores de caché, convierte texto directo en bloques y completa los
+campos requeridos por Zed en herramientas/resultados. Los roles desconocidos se
+rechazan antes de enviar la petición. El comportamiento de proveedores Messages
+ajenos a Zed permanece igual.
+
+La suite completa pasa con 94 pruebas (27 motor, 54 servidor, 13 CLI), una prueba
+remota omitida; también pasan Clippy y formato. El caso HTTP incluye instrucciones
+mixtas y contenido de texto directo tanto en JSON como en SSE.
+
+Tras reconstruir y sustituir el contenedor Compose conservando `proxy-data`,
+se verificaron `/health` y `/api/status`. Una petición real a
+`zed/claude-haiku-5-5`, con `system` superior y otro mensaje de rol `system`,
+texto directo y límite de 32 tokens, devolvió HTTP 200, un mensaje Anthropic,
+texto `OK` y `stop_reason: end_turn` (35 tokens de entrada, 4 de salida).
+La imagen previa se conserva como `claude-proxy:before-zed-request-fix`.
+
 ## Regresiones y mejoras cubiertas
 
 Se mantienen las pruebas existentes de razonamiento, herramientas paralelas y

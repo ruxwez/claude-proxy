@@ -12,6 +12,16 @@ pub enum ProviderKind {
     Chatgpt,
     Google,
     OpenaiCompatible,
+    Zed,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ZedCredentials {
+    pub user_id: u32,
+    pub access_token: String,
+    pub organization_id: String,
+    pub system_id: String,
+    pub client_version: String,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -43,6 +53,8 @@ pub struct Model {
     pub credential: Credential,
     #[serde(default = "yes")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zed_provider: Option<claude_proxy_engine::zed::Provider>,
 }
 fn yes() -> bool {
     true
@@ -60,6 +72,8 @@ pub struct Provider {
     pub api_key: Option<String>,
     #[serde(default)]
     pub subscription: Option<Subscription>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zed: Option<ZedCredentials>,
     #[serde(default = "yes")]
     pub enabled: bool,
     #[serde(default)]
@@ -126,7 +140,40 @@ impl Settings {
             ensure!(providers.insert(&p.id), "ID de proveedor duplicado");
             ensure!(!p.name.trim().is_empty(), "Nombre de proveedor requerido");
             let mut ids = HashSet::new();
+            ensure!(
+                p.kind == ProviderKind::Zed || p.zed.is_none(),
+                "Credenciales Zed en un proveedor distinto"
+            );
+            if p.kind == ProviderKind::Zed {
+                ensure!(
+                    p.api_key.as_ref().is_none_or(|k| k.is_empty()),
+                    "Zed utiliza autenticación de cuenta, no API key"
+                );
+                if let Some(auth) = &p.zed {
+                    ensure!(
+                        auth.user_id > 0
+                            && !auth.access_token.trim().is_empty()
+                            && !auth.organization_id.trim().is_empty()
+                            && !auth.client_version.trim().is_empty(),
+                        "Credenciales Zed incompletas"
+                    );
+                }
+            }
             for m in &p.models {
+                if p.kind == ProviderKind::Zed {
+                    let provider = m.zed_provider.ok_or_else(|| {
+                        anyhow::anyhow!("Selecciona el proveedor original del modelo Zed")
+                    })?;
+                    ensure!(
+                        m.protocol == provider.protocol(),
+                        "Protocolo incompatible con el proveedor original de Zed"
+                    );
+                } else {
+                    ensure!(
+                        m.zed_provider.is_none(),
+                        "Proveedor original Zed en un modelo ajeno"
+                    );
+                }
                 ensure!(
                     !m.id.is_empty() && m.id.trim() == m.id && !m.id.chars().any(char::is_control),
                     "ID de modelo inválido"

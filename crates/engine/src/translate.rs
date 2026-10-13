@@ -34,7 +34,7 @@ fn is_proxy_state(block: &Value) -> bool {
             .is_some_and(|s| s.starts_with(STATE_PREFIX))
 }
 
-fn replay_state(block: &Value, model: &str, kind: &str) -> Result<Option<Value>> {
+pub(crate) fn replay_state(block: &Value, model: &str, kind: &str) -> Result<Option<Value>> {
     if !is_proxy_state(block) {
         return Ok(None);
     }
@@ -58,6 +58,7 @@ fn replay_state(block: &Value, model: &str, kind: &str) -> Result<Option<Value>>
     }
     let value = capsule["value"].clone();
     match kind {
+        "zed_google" => ensure!(value.is_array(), "Estado Google inválido"),
         "responses" => ensure!(
             value["type"] == "reasoning"
                 && value["encrypted_content"]

@@ -33,6 +33,10 @@ mod stream;
 mod tests;
 #[path = "adapters/traces.rs"]
 mod traces;
+#[path = "adapters/zed.rs"]
+mod zed;
+#[cfg(test)]
+mod zed_tests;
 use claude_proxy_engine::translate;
 
 struct Config {
@@ -46,6 +50,7 @@ struct Config {
     protocols: HashMap<String, Protocol>,
 }
 struct ProviderConfig {
+    zed: Option<zed::Config>,
     opencode: bool,
     name: String,
     base: String,

@@ -54,6 +54,9 @@ impl Catalog {
         credential: Credential,
         refresh: bool,
     ) -> Result<Value> {
+        if provider.kind == ProviderKind::Zed {
+            return crate::zed::catalog(provider).await;
+        }
         let upstream = fetch_models(provider, credential).await?;
         let metadata_provider = provider
             .models_dev_provider
@@ -64,6 +67,7 @@ impl Catalog {
                 ProviderKind::Openai | ProviderKind::Chatgpt => "openai",
                 ProviderKind::Google => "google",
                 ProviderKind::OpenaiCompatible => &provider.id,
+                ProviderKind::Zed => "zed",
             });
         let (catalog, warning) = match self.metadata(refresh).await {
             Ok(data) => (data, None),

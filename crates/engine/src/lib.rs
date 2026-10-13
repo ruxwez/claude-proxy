@@ -1,6 +1,7 @@
 //! Pure protocol conversion. No HTTP, database, filesystem or async runtime.
 pub mod stream;
 pub mod translate;
+pub mod zed;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
