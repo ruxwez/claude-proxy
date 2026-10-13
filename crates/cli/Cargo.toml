@@ -1,5 +1,8 @@
 [package]
-name = "cli"
+name = "claude-proxy-cli"
+description = "Terminal interface and local service installer for Claude Proxy"
+repository = "https://github.com/ruxwez/claude-proxy"
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +13,7 @@ name = "claude-proxy"
 path = "src/main.rs"
 
 [dependencies]
-claude-proxy-service = { path = "../service" }
+claude-proxy-service = { path = "../service", version = "=0.1.0" }
 rpassword = "7"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored", "crypto-rust"] }
 sha2 = "0.10"

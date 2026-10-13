@@ -11,3 +11,4 @@ config.toml
 *.sqlite3-shm
 *.sqlite3-wal
 /dist/
+__pycache__/

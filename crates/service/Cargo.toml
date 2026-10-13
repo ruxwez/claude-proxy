@@ -1,5 +1,7 @@
 [package]
 name = "claude-proxy-service"
+description = "Native service management for Claude Proxy"
+repository = "https://github.com/ruxwez/claude-proxy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

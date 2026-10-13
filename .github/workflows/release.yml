@@ -1,12 +1,40 @@
-name: Native binaries
+name: Release CLI + server
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish or retry (e.g. v0.1.0)
+        required: true
+        type: string
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 permissions:
-  contents: write
+  contents: read
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check tag, package versions and registry credentials
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo 'Missing CARGO_REGISTRY_TOKEN repository secret'; exit 1; }
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          python3 scripts/verify_release.py --tag "$RELEASE_TAG"
+      - run: python3 -m unittest discover -s scripts -p 'test_release.py'
+      - run: cargo test --workspace --locked
   build:
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +60,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --release --locked
@@ -46,8 +76,50 @@ jobs:
         with:
           name: binaries-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
         with:
-          files: dist/*
-          draft: true
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+      - name: Verify every platform includes matching CLI + server
+        run: python3 scripts/verify_release.py --tag "$RELEASE_TAG" --dist dist
+      - name: Stage all assets in a single GitHub release
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft > release-state.json; then
+            if python3 -c 'import json; import sys; sys.exit(not json.load(open("release-state.json"))["isDraft"])'; then
+              gh release upload "$RELEASE_TAG" dist/* --clobber
+            else
+              # Published assets are immutable; retries only verify completeness.
+              gh release download "$RELEASE_TAG" --dir published
+              python3 scripts/verify_release.py --tag "$RELEASE_TAG" --dist published
+            fi
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
+          fi
+      - name: Publish service dependency, then CLI to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: python3 scripts/publish_crates.py
+      - name: Publish the complete GitHub release
+        shell: bash
+        run: |
+          prerelease=false
+          if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=true; fi
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"

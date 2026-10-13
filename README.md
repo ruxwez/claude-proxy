@@ -3,6 +3,10 @@
 Monorepo Rust con motor de conversión independiente, servidor hexagonal y panel
 TUI con Ratatui. No requiere Node ni incluye una UI web.
 
+La [publicación automatizada](docs/releases.md) genera una única release con CLI
+y servidor, y publica el CLI en crates.io.
+El workflow [Tests](docs/testing.md) verifica los cambios sin API keys reales.
+
 ## Instalación y conexión
 
 Descarga el paquete de tu plataforma de [Releases](https://github.com/ruxwez/claude-proxy/releases)
@@ -31,6 +35,10 @@ de compilación ni descargar nada más. Si solo tienes el CLI, busca el servidor
 junto a él o en PATH y, como alternativa, descarga el binario y su SHA-256 de la
 release de la misma versión. En repositorios privados descarga el paquete con
 una cuenta autorizada: el CLI no solicita ni guarda un token de GitHub.
+
+También puedes instalar el CLI desde crates.io con `cargo install --locked claude-proxy-cli`.
+Al instalar el servidor local, descarga el servidor de la release de su misma versión
+si no lo encuentra junto al CLI o en PATH.
 
 Para compilar e instalar desde el repositorio (Rust 1.96 y compilador C):
 
@@ -288,7 +296,7 @@ crates/proxy/              ejecutable claude-proxy-server
   src/domain.rs           configuración y puerto SettingsStore
   src/application.rs      casos de uso, validación y snapshots
   src/adapters/           REST, Anthropic, upstream, OAuth, SQL y trazas
-crates/cli/                paquete cli; ejecutable claude-proxy
+crates/cli/                paquete claude-proxy-cli; ejecutable claude-proxy
   src/control.rs          descubrimiento, cliente REST y configuración local
   src/tui.rs              panel Ratatui
   src/main.rs             arranque y sincronización de Claude Code

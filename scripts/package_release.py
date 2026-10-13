@@ -20,3 +20,7 @@ with zipfile.ZipFile(dist / f"claude-proxy-{os_name}-{arch}.zip", "w", zipfile.Z
         archive.write(Path("target/release") / (binary + suffix), binary + suffix)
     archive.write("README.md")
     archive.write("docs/deployment.md", "docs/deployment.md")
+bundle = dist / f"claude-proxy-{os_name}-{arch}.zip"
+bundle.with_name(bundle.name + ".sha256").write_text(
+    hashlib.sha256(bundle.read_bytes()).hexdigest() + "  " + bundle.name + "\n"
+)

@@ -6,13 +6,13 @@ build:
 run:
 	$(CARGO) run --locked -p claude-proxy-server
 cli:
-	$(CARGO) run --locked -p cli
+	$(CARGO) run --locked -p claude-proxy-cli
 install-cli:
 	$(CARGO) install --locked --path crates/cli
 update-models:
-	$(CARGO) run --locked -p cli -- --sync --endpoint "$(ENDPOINT)"
+	$(CARGO) run --locked -p claude-proxy-cli -- --sync --endpoint "$(ENDPOINT)"
 preview-models:
-	$(CARGO) run --locked -p cli -- --dry-run --endpoint "$(ENDPOINT)"
+	$(CARGO) run --locked -p claude-proxy-cli -- --dry-run --endpoint "$(ENDPOINT)"
 test:
 	$(CARGO) test --workspace --locked
 fmt:
