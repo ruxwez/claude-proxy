@@ -69,6 +69,10 @@ def scenario(server, cli_bin, directory, provider_port, database_url=None):
     cli_env = env.copy()
     # Isolate all configuration/credential fallback paths from the real user.
     cli_env.update(HOME=str(directory), USERPROFILE=str(directory), APPDATA=str(directory / "appdata"), XDG_CONFIG_HOME=str(directory / "config"), CLAUDE_CONFIG_DIR=str(directory / "claude"), CLAUDE_PROXY_CONFIG_DIR=str(directory / "cli-config"), DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent")
+    # Local probes, management and Claude sync must all bypass HTTP proxies.
+    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
+        cli_env[name]="http://127.0.0.1:9"
+    cli_env["NO_PROXY"]=cli_env["no_proxy"]=""
     logfile = (directory / "server.log").open("wb")
     def start():
         process = subprocess.Popen([str(server)], env=env, stdout=logfile, stderr=logfile)

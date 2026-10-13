@@ -7,6 +7,23 @@ use std::{
     time::Duration,
 };
 
+pub fn http_builder(url: &reqwest::Url) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }) {
+        // Discovery and every local API request remain on loopback even when
+        // HTTP_PROXY is set, without exposing gateway credentials to a proxy.
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     pub endpoint: String,
@@ -27,21 +44,9 @@ impl Client {
             value.set_sensitive(true);
             headers.insert("x-api-key", value);
         }
-        let mut builder = reqwest::Client::builder()
+        let builder = http_builder(&reqwest::Url::parse(&endpoint)?)
             .default_headers(headers)
-            .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::none());
-        let url = reqwest::Url::parse(&endpoint)?;
-        if url.host_str().is_some_and(|host| {
-            host == "localhost"
-                || host
-                    .trim_matches(['[', ']'])
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        }) {
-            // Discovery must remain on loopback even when HTTP_PROXY is set.
-            builder = builder.no_proxy();
-        }
+            .timeout(Duration::from_secs(20));
         Ok(Self {
             endpoint,
             key: key.into(),

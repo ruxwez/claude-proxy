@@ -175,7 +175,7 @@ fn urls(endpoint: &str) -> Result<(String, reqwest::Url)> {
 }
 
 async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Page> {
-    let client = reqwest::Client::builder()
+    let client = control::http_builder(&url)
         .timeout(Duration::from_secs(timeout))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
