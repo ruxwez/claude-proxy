@@ -33,7 +33,15 @@ pub async fn prepare_server() -> Result<PathBuf> {
         // Never replace an executable already running (especially Windows). An
         // existing managed copy is reused; upgrades are an explicit operation.
         if !destination.exists() {
-            std::fs::copy(&binary, &destination)?;
+            let mut source = std::fs::File::open(&binary)?;
+            let mut staged = tempfile::NamedTempFile::new_in(&directory)?;
+            std::io::copy(&mut source, &mut staged)?;
+            staged.as_file().sync_all()?;
+            match staged.persist_noclobber(&destination) {
+                Ok(file) => drop(file),
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.error.into()),
+            }
         }
     }
     #[cfg(unix)]

@@ -128,7 +128,10 @@ Bash/Zsh:
 export PROXY_HOST=0.0.0.0
 export PROXY_CONFIG_DIR=/ruta/persistente/claude-proxy
 # Opcionales; introduce la clave sin añadirla al historial del shell.
-read -rs -p 'AUTH_KEY: ' AUTH_KEY; export AUTH_KEY; echo
+printf 'AUTH_KEY: '
+IFS= read -r -s AUTH_KEY
+export AUTH_KEY
+printf '\n'
 # export DATABASE_URL='postgresql://usuario:clave@db.example/proxy?sslmode=require'
 ./claude-proxy-server
 ```

@@ -78,6 +78,34 @@ def main():
                 subprocess.run(["sudo", "rm", "-f", "/etc/systemd/system/claude-proxy.service"], check=True)
                 subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
 
+    with tempfile.TemporaryDirectory(prefix="claude-proxy-local-") as temp:
+        directory=Path(temp)
+        env=os.environ.copy()
+        env.update(HOME=temp, XDG_CONFIG_HOME=str(directory/"config"), ProgramData=str(directory/"programdata"), CLAUDE_PROXY_CONFIG_DIR=str(directory/"cli"))
+        cli=args.bin_dir.resolve()/("claude-proxy"+suffix)
+        local_base="http://127.0.0.1:10801"
+        try:
+            subprocess.run([str(cli),"service","install"],env=env,check=True,timeout=60)
+            wait_status(local_base,True)
+            subprocess.run([str(cli),"config","check"],env=env,check=True,timeout=10)
+            with urllib.request.urlopen(local_base+"/api/cli-config") as response:
+                assert json.load(response)["anthropic_port"]==10800
+            assert (directory/"cli/config.json").is_file()
+            managed=list(directory.rglob("bin/claude-proxy-server"+suffix))
+            assert len(managed)==1, "The CLI did not prepare a stable managed server binary"
+            assert list(directory.rglob("proxy.sqlite3")), "Local installer did not initialize SQLite"
+            subprocess.run([str(cli),"service","install"],env=env,check=True,timeout=60)
+            wait_status(local_base,True)
+            print("CLI local installation: managed binary, SQLite, system service, saved connection and idempotent reinstall OK")
+        finally:
+            subprocess.run([str(cli),"service","stop"],env=env,check=False,timeout=60)
+            if os.name=="nt": subprocess.run(["sc.exe","delete","claude-proxy"],check=False)
+            elif sys.platform=="darwin": subprocess.run(["sudo","rm","-f","/Library/LaunchDaemons/com.claude-proxy.server.plist"],check=True)
+            else:
+                subprocess.run(["sudo","systemctl","disable","claude-proxy"],check=True)
+                subprocess.run(["sudo","rm","-f","/etc/systemd/system/claude-proxy.service"],check=True)
+                subprocess.run(["sudo","systemctl","daemon-reload"],check=True)
+
 
 if __name__ == "__main__":
     main()
