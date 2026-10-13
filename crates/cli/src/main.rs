@@ -10,7 +10,9 @@ use std::{
     time::Duration,
 };
 
+mod callback;
 mod control;
+mod installation;
 mod tui;
 
 #[derive(Parser)]
@@ -18,19 +20,92 @@ mod tui;
 struct Launch {
     #[command(flatten)]
     args: Args,
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Sincronizar Claude Code sin abrir el panel
     #[arg(long)]
     sync: bool,
 }
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Configuración de conexión, independiente de los datos del servidor
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Gestionar el servidor instalado en este equipo
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+#[derive(clap::Subcommand)]
+enum ServiceAction {
+    Install,
+    Start,
+    Stop,
+    Restart,
+    Status,
+}
+#[derive(clap::Subcommand)]
+enum ConfigAction {
+    Show,
+    Connect {
+        endpoint: String,
+    },
+    Key {
+        #[arg(long)]
+        clear: bool,
+    },
+    Check,
+}
+async fn configuration(action: ConfigAction) -> Result<()> {
+    match action {
+        ConfigAction::Connect { endpoint } => {
+            let key = control::prompt_key()?;
+            control::configure(&endpoint, &key).await?;
+            println!("Conexión guardada");
+        }
+        ConfigAction::Show => {
+            let client = control::connection()?.context("No hay conexión guardada")?;
+            println!(
+                "Endpoint: {}\nClave: {}",
+                client.endpoint,
+                if client.credential_store.is_none() {
+                    "sin configurar"
+                } else {
+                    "configurada"
+                }
+            );
+        }
+        ConfigAction::Key { clear } => {
+            let client = control::connection()?.context("No hay conexión guardada")?;
+            let key = if clear {
+                String::new()
+            } else {
+                control::prompt_key()?
+            };
+            control::remember(&control::Client::with_key(&client.endpoint, &key)?)?;
+            println!("Clave actualizada");
+        }
+        ConfigAction::Check => {
+            let client = control::saved()?.context("No hay conexión guardada")?;
+            let status = client.probe().await?;
+            println!(
+                "{} · versión {} · disponible",
+                client.endpoint,
+                status["version"].as_str().unwrap_or("desconocida")
+            );
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, clap::Args)]
 struct Args {
     /// URL de la API REST, o URL completa de /api/cli-config
-    #[arg(
-        long,
-        env = "CLAUDE_PROXY_URL",
-        default_value = "http://localhost:10801"
-    )]
+    #[arg(long, env = "CLAUDE_PROXY_URL", default_value = "")]
     endpoint: String,
     /// Archivo settings.json; por defecto CLAUDE_CONFIG_DIR o ~/.claude/settings.json
     #[arg(long)]
@@ -45,11 +120,7 @@ struct Args {
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
     timeout: u64,
     /// Credencial del proxy, nunca la clave del proveedor
-    #[arg(
-        long,
-        env = "CLAUDE_PROXY_API_KEY",
-        default_value = "local-opencode-go"
-    )]
+    #[arg(long, env = "CLAUDE_PROXY_API_KEY", default_value = "")]
     api_key: String,
 }
 
@@ -72,6 +143,11 @@ struct Page {
     default_model: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    anthropic_port: Option<u16>,
+    #[serde(default)]
+    public_url_explicit: bool,
+    #[serde(default)]
+    gateway_on_this_endpoint: bool,
 }
 
 fn urls(endpoint: &str) -> Result<(String, reqwest::Url)> {
@@ -109,8 +185,11 @@ async fn fetch_models(url: reqwest::Url, timeout: u64, key: &str) -> Result<Page
     for _ in 0..1000 {
         let mut request = client
             .get(url.clone())
-            .header("x-api-key", key)
-            .bearer_auth(key)
+            .header("x-api-key", {
+                let mut value = reqwest::header::HeaderValue::from_str(key)?;
+                value.set_sensitive(true);
+                value
+            })
             .query(&[("refresh", "true"), ("limit", "1000")]);
         if let Some(cursor) = &cursor {
             request = request.query(&[("after_id", cursor)]);
@@ -271,9 +350,21 @@ async fn run(args: &Args) -> Result<Report> {
     let (_, url) = urls(&args.endpoint)?;
     let page = fetch_models(url, args.timeout, &args.api_key).await?;
     let models = page.data;
-    let base = page
+    let mut base = page
         .anthropic_base_url
         .context("La API interna no devolvió anthropic_base_url")?;
+    if let Some(port) = page.anthropic_port
+        && !page.public_url_explicit
+    {
+        let (endpoint, _) = urls(&args.endpoint)?;
+        let mut url = reqwest::Url::parse(&endpoint)?;
+        // HTTPS reverse proxies expose management and gateway on one endpoint.
+        if !page.gateway_on_this_endpoint && url.scheme() != "https" {
+            url.set_port(Some(port))
+                .map_err(|_| anyhow::anyhow!("Puerto inválido"))?;
+        }
+        base = url.as_str().trim_end_matches('/').into();
+    }
     let parsed_base = reqwest::Url::parse(&base)?;
     ensure!(
         ["http", "https"].contains(&parsed_base.scheme())
@@ -347,7 +438,11 @@ async fn run(args: &Args) -> Result<Report> {
         previous.clone(),
         &models,
         &base,
-        &args.api_key,
+        if args.api_key.is_empty() {
+            "local-opencode-go"
+        } else {
+            &args.api_key
+        },
         args.default_model
             .as_deref()
             .or(page.default_model.as_deref()),
@@ -381,6 +476,11 @@ async fn run(args: &Args) -> Result<Report> {
         if let Some(permissions) = &permissions {
             file.set_permissions(permissions.clone())?;
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(original)?;
         file.sync_all()?;
         report.backup = Some(backup);
@@ -388,6 +488,12 @@ async fn run(args: &Args) -> Result<Report> {
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     if let Some(permissions) = permissions {
         temp.as_file().set_permissions(permissions)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     serde_json::to_writer_pretty(&mut temp, &next)?;
     temp.write_all(b"\n")?;
@@ -408,9 +514,39 @@ async fn run(args: &Args) -> Result<Report> {
 async fn main() {
     let launch = Launch::parse();
     let mut args = launch.args;
+    if let Some(command) = launch.command {
+        let result = match command {
+            Command::Config { action } => configuration(action).await,
+            Command::Service { action } => {
+                if matches!(action, ServiceAction::Install) {
+                    async {
+                        let binary = installation::prepare_server().await?;
+                        installation::install(binary)?;
+                        let client = control::Client::with_key("http://127.0.0.1:10801", "")?;
+                        control::wait_ready(&client).await?;
+                        control::remember(&client)
+                    }
+                    .await
+                } else {
+                    claude_proxy_service::manage(&match action {
+                        ServiceAction::Start => claude_proxy_service::Action::Start,
+                        ServiceAction::Stop => claude_proxy_service::Action::Stop,
+                        ServiceAction::Restart => claude_proxy_service::Action::Restart,
+                        ServiceAction::Status => claude_proxy_service::Action::Status,
+                        _ => unreachable!(),
+                    })
+                }
+            }
+        };
+        if let Err(error) = result {
+            eprintln!("Error: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if !launch.sync && !args.dry_run {
         let result = async {
-            let client = control::connect(&args.endpoint).await?;
+            let client = control::connect(&args.endpoint, &args.api_key, true).await?;
             tui::run(client, &args).await
         }
         .await;
@@ -420,8 +556,11 @@ async fn main() {
         }
         return;
     }
-    match control::connect(&args.endpoint).await {
-        Ok(client) => args.endpoint = client.endpoint,
+    match control::connect(&args.endpoint, &args.api_key, false).await {
+        Ok(client) => {
+            args.endpoint = client.endpoint;
+            args.api_key = client.key;
+        }
         Err(error) => {
             eprintln!("Error: {error:#}");
             std::process::exit(1);

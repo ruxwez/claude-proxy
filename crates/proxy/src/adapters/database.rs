@@ -19,6 +19,30 @@ pub enum Database {
     Mysql { url: String },
 }
 impl Database {
+    pub fn from_url(url: &str) -> Result<Self> {
+        // Do not include the DSN in errors: it can contain a password.
+        let (scheme, rest) = url
+            .split_once(':')
+            .context("DATABASE_URL requiere un esquema")?;
+        match scheme {
+            "postgres" | "postgresql" => Ok(Self::Postgres { url: url.into() }),
+            "mysql" => Ok(Self::Mysql { url: url.into() }),
+            "sqlite" => {
+                let path = rest.strip_prefix("//").unwrap_or(rest);
+                ensure!(
+                    !path.is_empty()
+                        && path != ":memory:"
+                        && !path.contains('?')
+                        && !path.contains('#'),
+                    "SQLite requiere una ruta persistente sin parámetros"
+                );
+                Ok(Self::Sqlite {
+                    path: PathBuf::from(path),
+                })
+            }
+            _ => anyhow::bail!("DATABASE_URL admite sqlite, postgres, postgresql o mysql"),
+        }
+    }
     pub fn open(&self) -> Result<Arc<dyn SettingsStore>> {
         match self {
             Self::Sqlite { path } => Ok(Arc::new(crate::sqlite::SqliteStore::open(path)?)),
@@ -127,12 +151,22 @@ async fn initialize(url: &str, postgres: bool) -> Result<sqlx::AnyPool> {
             "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, document LONGTEXT NOT NULL)"
         };
         sqlx::query(schema).execute(&pool).await?;
+        // Versioned, transactional startup migration; existing v1 installations
+        // are adopted without replacing their document or host identity.
+        sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)").execute(&pool).await?;
+        if let Some(row) = sqlx::query("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").fetch_optional(&pool).await? {
+            ensure!(row.try_get::<i32,_>(0)? <= 1, "Esquema más reciente que este servidor");
+        }
+        let mut migration = pool.begin().await?;
         let insert = if postgres {
             "INSERT INTO settings (id,document) VALUES (1,$1) ON CONFLICT (id) DO NOTHING"
         } else {
             "INSERT IGNORE INTO settings (id,document) VALUES (1,?)"
         };
-        sqlx::query(insert).bind(serde_json::to_string(&Settings::default())?).execute(&pool).await?;
+        sqlx::query(insert).bind(serde_json::to_string(&Settings::default())?).execute(&mut *migration).await?;
+        let version = if postgres { "INSERT INTO schema_migrations VALUES (1) ON CONFLICT DO NOTHING" } else { "INSERT IGNORE INTO schema_migrations VALUES (1)" };
+        sqlx::query(version).execute(&mut *migration).await?;
+        migration.commit().await?;
         anyhow::Ok(pool)
     }).await?
 }

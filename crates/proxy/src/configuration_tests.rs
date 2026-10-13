@@ -81,7 +81,7 @@ async fn sqlite_configuration_is_live_durable_redacted_and_enforced() {
             .await
             .unwrap()
             .status(),
-        StatusCode::NOT_FOUND
+        StatusCode::OK
     );
     assert_eq!(
         http.post(format!("{ui}/v1/messages"))

@@ -4,12 +4,20 @@ services:
       context: .
       target: proxy
     image: claude-proxy:rust
-    container_name: claude-proxy
     restart: unless-stopped
-    command: ["--host", "0.0.0.0", "--config-dir", "/data"]
+    environment:
+      PROXY_HOST: 0.0.0.0
+      PROXY_CONFIG_DIR: /data
+      PROXY_PORT: 10800
+      PROXY_ADMIN_PORT: 10801
+      PROXY_ADMIN_HOST: ${PROXY_ADMIN_HOST:-}
+      # Empty optional variables are omitted; an empty AUTH_KEY is rejected.
+    env_file:
+      - path: .env
+        required: false
     ports:
-      - "127.0.0.1:10800:10800"
-      - "127.0.0.1:10801:10801"
+      # The gateway also serves /api/*: one public port is sufficient.
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${PROXY_EXPOSE_PORT:-10800}:10800"
     volumes:
       - proxy-data:/data
     init: true
