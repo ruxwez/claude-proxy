@@ -147,7 +147,7 @@ impl Panel {
                 areas[1],
             );
         } else if self.tab == 4 {
-            frame.render_widget(Paragraph::new(format!("Endpoint: {}\nClave: {}\n\nEnter: conexión, conectividad y servicio local.\nSincroniza con Claude Code después de cambiar de servidor.",self.client.endpoint,if self.client.key.is_empty(){"sin configurar"}else{"configurada"})).wrap(Wrap{trim:false}).block(panel_block("Conexión",!self.sidebar)),areas[1]);
+            frame.render_widget(Paragraph::new(format!("Endpoint: {}\nClave: {}\n\nEnter: conexión, conectividad y servicio local.\nU: actualizar servidor local a la última versión estable.\nLa actualización reinicia el servicio y conserva los datos.\nSincroniza con Claude Code después de cambiar de servidor.",self.client.endpoint,if self.client.key.is_empty(){"sin configurar"}else{"configurada"})).wrap(Wrap{trim:false}).block(panel_block("Conexión",!self.sidebar)),areas[1]);
         } else if self.tab == 2 {
             let settings = &self.settings;
             let content = format!(

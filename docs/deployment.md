@@ -31,6 +31,7 @@ claude-proxy service status
 claude-proxy service stop
 claude-proxy service start
 claude-proxy service restart
+claude-proxy service update
 ```
 
 Linux necesita systemd como gestor del equipo; un contenedor/WSL sin systemd no

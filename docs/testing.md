@@ -29,3 +29,10 @@ cargo test --workspace --locked
 `scripts/verify_reasoning.py` es una comprobación opcional con proveedores reales:
 usa las credenciales configuradas en la base de datos y puede consumir cuota.
 No forma parte del workflow **Tests**.
+
+`scripts/verify_chatgpt_cache.py --database /ruta/proxy.sqlite3` realiza dos
+peticiones pequeñas con GPT-6 Luna y esfuerzo bajo para comprobar la caché
+de una sesión ChatGPT conectada. Consume cuota y solo debe ejecutarse con
+autorización. Utiliza configuración aislada, no modifica el servicio y no
+imprime credenciales. El informe está en
+[chatgpt-cache-verification.md](chatgpt-cache-verification.md).

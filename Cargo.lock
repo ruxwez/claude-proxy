@@ -511,7 +511,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claude-proxy-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -523,6 +523,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "rpassword",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -534,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "claude-proxy-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -546,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "claude-proxy-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -578,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "claude-proxy-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",

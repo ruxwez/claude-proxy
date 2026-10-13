@@ -43,6 +43,8 @@ enum Command {
 #[derive(clap::Subcommand)]
 enum ServiceAction {
     Install,
+    /// Descargar la última release estable y actualizar el servidor de este equipo
+    Update,
     Start,
     Stop,
     Restart,
@@ -532,6 +534,10 @@ async fn main() {
                         control::remember(&client)
                     }
                     .await
+                } else if matches!(action, ServiceAction::Update) {
+                    installation::update()
+                        .await
+                        .map(|message| println!("{message}"))
                 } else {
                     claude_proxy_service::manage(&match action {
                         ServiceAction::Start => claude_proxy_service::Action::Start,

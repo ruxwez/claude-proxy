@@ -109,7 +109,15 @@ impl Catalog {
                 } else {
                     crate::domain::Protocol::Chat
                 };
-                json!({"id":id,"display_name":metadata["name"].as_str().unwrap_or(id),
+                let display_name = metadata["name"]
+                    .as_str()
+                    .or_else(|| {
+                        (credential == Credential::Subscription)
+                            .then(|| raw["display_name"].as_str())
+                            .flatten()
+                    })
+                    .unwrap_or(id);
+                json!({"id":id,"display_name":display_name,
                 "suggested_protocol":protocol,"metadata":metadata,
                 "match":matched,"canonical_model_id":canonical_id})
             })
@@ -194,10 +202,8 @@ async fn fetch_models(provider: &Provider, credential: Credential) -> Result<Vec
                 .header("user-agent", "opencode/2.0.26");
         }
         let page = read_json(request).await?;
-        let items = page["data"]
-            .as_array()
-            .context("El catálogo del proveedor debe contener data")?;
-        for raw in items {
+        let items = catalog_items(&page, credential)?;
+        for raw in &items {
             let id = raw["id"]
                 .as_str()
                 .filter(|id| {
@@ -231,8 +237,58 @@ async fn fetch_models(provider: &Provider, credential: Credential) -> Result<Vec
     anyhow::bail!("Demasiadas páginas en el catálogo del proveedor")
 }
 
+fn catalog_items(page: &Value, credential: Credential) -> Result<Vec<Value>> {
+    if credential == Credential::Subscription {
+        return page["models"]
+            .as_array()
+            .context("El catálogo ChatGPT debe contener models")?
+            .iter()
+            .filter(|model| model["visibility"] == "list")
+            .map(|model| {
+                let id = model["slug"].as_str().context("Modelo ChatGPT sin slug")?;
+                ensure!(
+                    !id.is_empty() && id.trim() == id && !id.chars().any(char::is_control),
+                    "El catálogo contiene un ID inválido"
+                );
+                // Do not retain provider instructions or internal client settings.
+                Ok(json!({"id":id,"display_name":model["display_name"].as_str().unwrap_or(id)}))
+            })
+            .collect();
+    }
+    Ok(page["data"]
+        .as_array()
+        .context("El catálogo del proveedor debe contener data")?
+        .clone())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chatgpt_catalog_uses_visible_slugs_and_discards_internal_instructions() {
+        let page = serde_json::json!({"models":[
+            {"slug":"gpt-6-luna","display_name":"GPT-6 Luna","visibility":"list","model_messages":{"instructions_template":"private"}},
+            {"slug":"internal","visibility":"hide"},
+            {"slug":"unspecified"}
+        ]});
+        assert_eq!(
+            super::catalog_items(&page, crate::domain::Credential::Subscription).unwrap(),
+            vec![serde_json::json!({"id":"gpt-6-luna","display_name":"GPT-6 Luna"})]
+        );
+        assert!(
+            super::catalog_items(
+                &serde_json::json!({"data":[]}),
+                crate::domain::Credential::Subscription
+            )
+            .is_err()
+        );
+        assert!(
+            super::catalog_items(
+                &serde_json::json!({"models":[{"visibility":"list"}]}),
+                crate::domain::Credential::Subscription
+            )
+            .is_err()
+        );
+    }
     use super::*;
     use axum::{
         Json, Router,

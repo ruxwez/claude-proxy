@@ -13,10 +13,11 @@ name = "claude-proxy"
 path = "src/main.rs"
 
 [dependencies]
-claude-proxy-service = { path = "../service", version = "=0.1.0" }
+claude-proxy-service = { path = "../service", version = "=0.1.1" }
 rpassword = "7"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored", "crypto-rust"] }
 sha2 = "0.10"
+semver = "1"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
 directories = "6"

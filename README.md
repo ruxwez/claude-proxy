@@ -119,6 +119,7 @@ claude-proxy service install       # local, siempre SQLite y loopback
 claude-proxy service start
 claude-proxy service stop
 claude-proxy service restart
+claude-proxy service update        # última release estable del servidor local
 claude-proxy service status
 ```
 
@@ -139,8 +140,14 @@ archivo y sus copias se protegen en Unix. No añadas esos archivos a repositorio
 Los datos del servicio local están en `server/` dentro de la carpeta habitual;
 en Windows se utilizan `%ProgramData%/ClaudeProxy`, con permisos de LocalService.
 Los ejecutables gestionados se guardan en su subdirectorio `bin/`. La instalación
-no reemplaza un binario existente en uso. Para actualizarlo, detén el servicio,
-sustituye el binario gestionado y vuelve a iniciarlo; los datos se conservan.
+no reemplaza un binario existente en uso durante una reinstalación. Para
+actualizarlo, elige **Conexión → Actualizar servidor local automáticamente**
+(`U`) o ejecuta `claude-proxy service update`. Busca la última release estable,
+verifica SHA-256 y versión, detiene el servicio, sustituye el ejecutable y
+comprueba que arranque la versión nueva. Si falla el arranque, restaura el
+binario anterior. Conserva bases de datos, credenciales y configuración del
+servicio. Puede solicitar sudo/UAC. La acción afecta solo a este equipo, aunque
+el CLI esté conectado a otro servidor; no hay actualizaciones en segundo plano.
 
 Las instrucciones completas de Docker, ejecución nativa y servicios están en
 [docs/deployment.md](docs/deployment.md).
@@ -172,6 +179,7 @@ acciones también se pueden elegir desde el menú de `Enter`:
 | Modelos | `r` actualizar catálogo y cotejo; los metadatos se consultan en el menú de `Enter` |
 | Preferencias | `e` editar modelo, contexto, compactación, timeout y URL pública; `R` restaurar límites |
 | Trazas | `e` configurar captura, `n`/`p` paginar, `x` exportar la página visible, `d` borrar con confirmación; inspeccionar desde `Enter` |
+| Conexión | `U` actualizar automáticamente el servidor local a la última release estable |
 | Todas | `s` sincronizar Claude Code, `r` actualizar, `q` salir |
 
 Los tipos de proveedor son `opencode_go`, `openai`, `chatgpt`, `google`,

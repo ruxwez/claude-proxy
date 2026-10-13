@@ -80,6 +80,14 @@ servicio puede rechazarlos incluso con esos IDs de modelo. El aviso
 `prompt_cache_uses_provider_defaults` identifica la adaptación; no se eliminan
 texto, herramientas ni contadores de caché recibidos. OpenAI con API key conserva
 la conversión anterior. También se aplica a las entradas de `count_tokens`.
+Para mantener la afinidad entre turnos se envía una clave determinista por
+proveedor, modelo y conversación en `prompt_cache_key` y `session-id`. Las
+identidades del cliente se convierten a SHA-256. Si no hay sesión identificable,
+se utiliza el primer mensaje como alternativa estable. El cambio se verificó
+con GPT-6 Luna: 2816 de 2952 tokens reutilizados en la segunda llamada, frente
+a cero en el control sin afinidad. Consulte el
+[informe del 2026-10-13](chatgpt-cache-verification.md); los aciertos y la cuota
+efectiva siguen dependiendo del proveedor.
 El 2026-10-12 se reprodujo el 400 anterior y se verificó la corrección en vivo:
 `gpt-6.1-sol`, `gpt-6-astra` y `gpt-6-luna` devolvieron HTTP 200 y `OK`, con fin
 de streaming sin errores. Las peticiones incluyeron marcadores de caché en

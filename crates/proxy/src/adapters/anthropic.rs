@@ -156,7 +156,7 @@ impl IntoResponse for ApiError {
 
 async fn health(State(proxy): State<Arc<Proxy>>) -> Json<Value> {
     Json(
-        json!({"status":"ok","implementation":"rust","connectors":proxy.providers.iter().map(|p|&p.config.name).collect::<Vec<_>>()}),
+        json!({"status":"ok","implementation":"rust","version":env!("CARGO_PKG_VERSION"),"connectors":proxy.providers.iter().map(|p|&p.config.name).collect::<Vec<_>>()}),
     )
 }
 
@@ -317,6 +317,7 @@ async fn messages(
     };
     if proxy.subscriptions.contains(&p.config.name) {
         translate::adapt_subscription_request(&mut body, &mut warnings);
+        body["prompt_cache_key"] = json!(p.prompt_cache_key(&headers, &req));
     }
     if (protocol != Protocol::Messages || zed_provider.is_some())
         && headers.contains_key("anthropic-beta")

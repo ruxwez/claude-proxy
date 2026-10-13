@@ -543,6 +543,7 @@ impl Panel {
                 ("Iniciar servicio local", Char('I')),
                 ("Detener servicio local", Char('D')),
                 ("Reiniciar servicio local", Char('J')),
+                ("Actualizar servidor local automáticamente", Char('U')),
                 ("Estado del servicio local", Char('V')),
             ],
             _ => {
@@ -609,6 +610,9 @@ impl Panel {
                 Some("Procesando la acción seleccionada…")
             }
             KeyCode::Char('n' | 'p') if self.tab == 3 => Some("Consultando página de trazas…"),
+            KeyCode::Char('U') if self.tab == 4 => {
+                Some("Buscando actualización del servidor local…")
+            }
             _ => None,
         }
     }
@@ -1000,6 +1004,19 @@ impl Panel {
                     status["version"].as_str().unwrap_or("desconocida")
                 );
             }
+            KeyCode::Char('U') if self.tab == 4 => {
+                ratatui::restore();
+                let result = crate::installation::update().await;
+                if let Err(error) = &result {
+                    eprintln!("Error: {error:#}");
+                }
+                eprintln!("Pulsa Enter para volver al panel.");
+                let mut line = String::new();
+                let input = std::io::stdin().read_line(&mut line);
+                let _ = ratatui::init();
+                input?;
+                self.message = result?;
+            }
             KeyCode::Char('I' | 'D' | 'J' | 'V') if self.tab == 4 => {
                 // Leave raw/alternate mode for sudo/UAC and status output.
                 ratatui::restore();
@@ -1256,5 +1273,23 @@ mod tests {
         panel.action(KeyCode::Esc, &args).await.unwrap();
         assert!(panel.menu.is_none());
         assert!(!panel.sidebar);
+    }
+
+    #[tokio::test]
+    async fn connection_menu_exposes_local_server_update() {
+        let mut panel = panel();
+        panel.tab = 4;
+        panel.sidebar = false;
+        let args = crate::Launch::try_parse_from(["claude-proxy"])
+            .unwrap()
+            .args;
+        panel.action(KeyCode::Enter, &args).await.unwrap();
+        let menu = panel.menu.as_ref().unwrap();
+        assert!(
+            menu.items
+                .iter()
+                .any(|(label, key)| label.contains("Actualizar servidor local")
+                    && *key == KeyCode::Char('U'))
+        );
     }
 }

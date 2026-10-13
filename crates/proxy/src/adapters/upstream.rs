@@ -61,11 +61,57 @@ impl Provider {
                 .send(reqwest::Method::POST, "/completions", Some(body))
                 .await;
         }
-        self.post(protocol, headers)
+        let mut request = self.post(protocol, headers);
+        if protocol == Protocol::Responses
+            && let Some(key) = body["prompt_cache_key"].as_str()
+        {
+            // ChatGPT derives cache affinity from this header as well as the
+            // Responses body key (see openai/codex commit bc5957eac9).
+            request = request.header("session-id", key);
+        }
+        request
             .json(body)
             .send()
             .await
             .context("Proveedor no alcanzable")
+    }
+
+    pub fn prompt_cache_key(&self, headers: &HeaderMap, req: &Value) -> String {
+        let session = ["x-claude-code-session-id", "x-session-id", "session-id"]
+            .iter()
+            .find_map(|name| {
+                headers
+                    .get(*name)?
+                    .to_str()
+                    .ok()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            });
+        let user = req["metadata"]["user_id"].as_str().unwrap_or_default();
+        let metadata = serde_json::from_str::<Value>(user).ok();
+        let session = session
+            .or_else(|| {
+                metadata
+                    .as_ref()?
+                    .get("session_id")?
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| {
+                user.rsplit_once("_session_")
+                    .map(|(_, id)| id)
+                    .filter(|id| !id.is_empty())
+            });
+        let identity = if let Some(session) = session {
+            json!({"session":session})
+        } else {
+            // Stateless fallback: appending turns must not change the route.
+            // Use the initial user turn, not the entire growing conversation.
+            json!({"user":user,"first_message":req["messages"].as_array().and_then(|all| all.first())})
+        };
+        let material = json!([self.config.name, req["model"], identity]);
+        // Never expose a client's identifier or prompt in provider headers.
+        format!("{:x}", Sha256::digest(material.to_string().as_bytes()))
     }
 
     pub async fn models(&self, refresh: bool) -> Result<Vec<Value>> {

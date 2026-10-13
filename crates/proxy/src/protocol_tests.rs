@@ -313,11 +313,76 @@ mod http {
                         .as_object_mut()
                         .unwrap()
                         .remove("safety_identifier");
+                    expected["prompt_cache_key"] = body["prompt_cache_key"].clone();
                 }
                 assert_eq!(*body, expected);
                 if !subscription {
                     assert_eq!(body["safety_identifier"].as_str().unwrap().len(), 64);
                     assert_ne!(body["safety_identifier"], req["metadata"]["user_id"]);
+                }
+            }
+            for task in tasks {
+                task.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_cache_affinity_is_stable_private_and_scoped_to_conversation() {
+        for subscription in [false, true] {
+            let (base, calls, tasks) =
+                fixture_with_subscription(Protocol::Responses, subscription).await;
+            for identity in ["header", "metadata_json", "metadata_legacy", "fallback"] {
+                let mut keys = Vec::new();
+                for conversation in ["one", "one", "two"] {
+                    let mut req = request(json!(format!("First turn {conversation}")));
+                    match identity {
+                        "metadata_json" => {
+                            req["metadata"] = json!({"user_id":json!({"session_id":conversation,"device_id":"private-device"}).to_string()})
+                        }
+                        "metadata_legacy" => {
+                            req["metadata"] = json!({"user_id":format!("user_private_account_private_session_{conversation}")})
+                        }
+                        _ => {}
+                    }
+                    if keys.len() == 1 {
+                        req["messages"].as_array_mut().unwrap().extend([
+                            json!({"role":"assistant","content":"Previous response"}),
+                            json!({"role":"user","content":"Follow-up turn"}),
+                        ]);
+                    }
+                    let mut request = reqwest::Client::new()
+                        .post(format!("{base}/v1/messages"))
+                        .json(&req);
+                    if identity == "header" {
+                        request = request.header("x-claude-code-session-id", conversation);
+                    }
+                    let response = request.send().await.unwrap();
+                    assert!(response.status().is_success());
+                    response.bytes().await.unwrap();
+                    let calls = calls.lock().unwrap();
+                    let (_, headers, body) = calls.last().unwrap();
+                    if subscription {
+                        let key = body["prompt_cache_key"].as_str().unwrap();
+                        assert_eq!(key.len(), 64);
+                        assert!(key.bytes().all(|b| b.is_ascii_hexdigit()));
+                        assert_eq!(headers["session-id"], key);
+                        keys.push(key.to_owned());
+                    } else {
+                        assert!(body.get("prompt_cache_key").is_none());
+                        assert!(!headers.contains_key("session-id"));
+                        keys.push(String::new());
+                    }
+                }
+                assert_eq!(
+                    keys[0], keys[1],
+                    "Appending a turn changed cache routing: {identity}"
+                );
+                if subscription {
+                    assert_ne!(
+                        keys[0], keys[2],
+                        "Conversations share an identifier: {identity}"
+                    );
                 }
             }
             for task in tasks {
