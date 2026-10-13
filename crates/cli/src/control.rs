@@ -27,14 +27,25 @@ impl Client {
             value.set_sensitive(true);
             headers.insert("x-api-key", value);
         }
+        let mut builder = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none());
+        let url = reqwest::Url::parse(&endpoint)?;
+        if url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }) {
+            // Discovery must remain on loopback even when HTTP_PROXY is set.
+            builder = builder.no_proxy();
+        }
         Ok(Self {
             endpoint,
             key: key.into(),
-            http: reqwest::Client::builder()
-                .default_headers(headers)
-                .timeout(Duration::from_secs(20))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?,
+            http: builder.build()?,
         })
     }
     pub async fn request(

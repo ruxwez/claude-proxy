@@ -15,7 +15,7 @@ como ejecutables (`chmod +x claude-proxy claude-proxy-server`) y ejecuta el CLI:
 
 El CLI comprueba primero la conexión guardada. Si falla, comprueba exclusivamente
 `127.0.0.1` y `::1` en el puerto REST estándar **10801**, con timeout de dos
-segundos por intento. No escanea la LAN ni utiliza broadcast, mDNS o subredes.
+segundos por intento, sin utilizar proxies HTTP para loopback. No escanea la LAN ni utiliza broadcast, mDNS o subredes.
 Ofrece reutilizar un servidor local encontrado; si no hay uno funcional, puedes
 **instalar el servidor local** o **introducir un endpoint y una clave opcional**.
 

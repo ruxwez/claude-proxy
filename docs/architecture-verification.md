@@ -33,8 +33,8 @@ las pruebas con el proxy y CA del entorno gestionado.
 
 - Compilación de los ejecutables del workspace en Linux.
 - Formato Rust y Clippy del workspace, incluyendo tests, con warnings como errores.
-- Suite del workspace: 100 pruebas correctas (27 motor, 57 servidor, 14 CLI,
-  2 servicios); la prueba remota se ejecuta por separado con sus dos DSN.
+- Suite del workspace: 101 pruebas correctas en Linux (27 motor, 57 servidor, 14 CLI,
+  3 servicios); la prueba remota se ejecuta por separado con sus dos DSN.
 - PostgreSQL 16 y MySQL 8.4 reales: esquema inicial, persistencia de claves y
   documento grande, reapertura y migración v1 idempotente.
 - `scripts/verify_architecture.py` contra procesos reales con SQLite,
@@ -48,6 +48,10 @@ las pruebas con el proxy y CA del entorno gestionado.
 - Compilación cruzada de `claude-proxy-service` para Windows x86_64 GNU
   y macOS x86_64, incluyendo dispatcher, control de parada, registro/UAC
   y definiciones launchd.
+- Unidad systemd comprobada con su parser real, incluyendo rutas con espacios.
+- launchd en una VM macOS de CI: instalación, arranque automático, reinstalación
+  sin perder la identidad persistida, inicio, parada, reinicio y estado correctos.
+- Paquete Linux release CLI + servidor y SHA-256 verificados.
 - Construcción real de la imagen Docker, ejecución sin root, `/health` y
   health check correcto; API sin clave rechazada con 401.
 - Prueba real autorizada de OpenCode Go: catálogo de 38 modelos y petición a
