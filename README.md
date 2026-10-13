@@ -78,22 +78,35 @@ haber un proceso de servidor por base, porque los snapshots son locales al proce
 
 ## Panel de terminal
 
-`Tab` y `←→` cambian entre Proveedores, Modelos, Preferencias y Trazas. `↑↓`
-navegan; `r` actualiza y `q` sale. En formularios, `Tab` cambia de campo,
-`Ctrl+U` vacía el campo, `Enter` guarda y `Esc` cancela. Las claves y DSN se ocultan.
+El panel tiene un menú lateral: elige Proveedores, Modelos, Preferencias o Trazas
+con `↑↓` y abre la sección con `Enter`. Dentro, selecciona un elemento con `↑↓`
+y pulsa `Enter` para ver sus acciones. El menú incluye añadir, editar, activar,
+consultar y sincronizar con Claude Code; también funciona cuando la lista está vacía.
+`Esc` vuelve al nivel anterior y `F1` muestra la ayuda.
+
+En formularios, `↑↓` o `Tab` cambian de campo. Los tipos de proveedor, protocolos,
+bases de datos y opciones Sí/No se eligen con `←→`; no hay que escribir sus nombres.
+`Enter` avanza al siguiente campo: solo guarda cuando seleccionas el botón
+**Guardar cambios** (o **Configurar servidor**). `Esc` cancela. Puedes mover el
+cursor con `←→`, `Inicio` y `Fin`, borrar con `Supr`/retroceso y vaciar con `Ctrl+U`.
+Las claves y DSN se ocultan. Los borrados de proveedores, modelos y trazas requieren
+escribir `ELIMINAR` y confirmar el botón.
+
+Los siguientes atajos siguen disponibles dentro de cada sección; todas esas
+acciones también se pueden elegir desde el menú de `Enter`:
 
 | Pantalla | Acciones |
 |---|---|
-| Proveedores | `n` crear, `e` editar, espacio habilitar, `d` eliminar con confirmación, `Enter` modelos |
-| Proveedores | `o` conectar ChatGPT en navegador, `u` desconectar, `K` borrar API key, `m` IDs de models.dev |
+| Proveedores | `n` crear, `e` editar, espacio habilitar, `d` eliminar con confirmación |
+| Proveedores | `o` conectar ChatGPT/Zed en navegador, `z` credenciales Zed, `u` desconectar, `K` borrar API key, `m` IDs de models.dev |
 | Modelos | `/` buscar, espacio activar/desactivar, `n` ID manual, `e` nombre/protocolo, `d` retirar, `f` predeterminado |
-| Modelos | `Enter` metadatos completos, `r` actualizar catálogo y cotejo |
+| Modelos | `r` actualizar catálogo y cotejo; los metadatos se consultan en el menú de `Enter` |
 | Preferencias | `e` editar modelo, contexto, compactación, timeout y URL pública; `R` restaurar límites |
-| Trazas | `e` configurar captura, `Enter` inspeccionar, `n`/`p` paginar, `x` exportar las 100 visibles, `d` borrar con confirmación |
-| Todas | `s` sincronizar Claude Code |
+| Trazas | `e` configurar captura, `n`/`p` paginar, `x` exportar la página visible, `d` borrar con confirmación; inspeccionar desde `Enter` |
+| Todas | `s` sincronizar Claude Code, `r` actualizar, `q` salir |
 
-Los tipos de proveedor son `opencode_go`, `openai`, `chatgpt`, `google` y
-`openai_compatible`. OpenCode Go, OpenAI y Google tienen endpoints predeterminados;
+Los tipos de proveedor son `opencode_go`, `openai`, `chatgpt`, `google`,
+`openai_compatible` y `zed`. OpenCode Go, OpenAI, Google y Zed tienen endpoints predeterminados;
 las APIs propias requieren URL. Cada modelo selecciona explícitamente `chat`,
 `responses` o `messages`. ChatGPT utiliza suscripción con Responses; Google utiliza
 Chat Completions. La API conserva las claves cuando el formulario envía `null`.
@@ -107,6 +120,46 @@ OAuth mantiene PKCE, state de un solo uso, nonce, JWKS y renovación en el servi
 El callback sigue en `http://127.0.0.1:10801/auth/callback`. La conexión ChatGPT se
 completa desde el equipo del servidor; el navegador muestra una confirmación y
 se vuelve al TUI con `r`. No se necesita una aplicación web.
+
+## Proveedor Zed nativo
+
+La API pública sigue siendo **Anthropic**: `/v1/models`, `/v1/messages` y SSE con
+eventos `message_start`, `content_block_*`, `message_delta` y `message_stop`.
+Los clientes no necesitan conocer el transporte de Zed. El servidor envía todos
+sus modelos a `https://cloud.zed.dev/completions`, incluidos los Claude.
+El motor desempaqueta NDJSON y adapta Anthropic Messages, OpenAI/xAI Responses y
+Google GenerateContent a ese contrato público. Para `stream:false` reconstruye
+el mensaje Anthropic completo a partir de los mismos eventos.
+
+En Proveedores, añade una conexión de tipo **Zed**, guarda y abre su menú con
+`Enter`. Elige **Conectar Zed en el navegador**; al terminar, actualiza los datos
+y abre **Ver y elegir modelos**. La conexión utiliza una clave RSA efímera y el
+callback nativo de Zed en `http://127.0.0.1:<puerto REST>/`. Ese puerto debe ser
+accesible desde el equipo del navegador, también con Docker o un túnel remoto.
+No se reinstala la UI web; el callback solo devuelve una confirmación de texto.
+
+Como alternativa, **Introducir credenciales de Zed** acepta el ID numérico de
+usuario y su token de cuenta, con organización opcional. No acepta una API key
+Anthropic ni el token LLM temporal como sustituto. El servidor comprueba la cuenta,
+selecciona su organización predeterminada/personal y obtiene un token LLM. Las
+credenciales de cuenta se guardan en la base del servidor; los tokens LLM se
+mantienen en memoria, se reutilizan y se renuevan una vez cuando Zed los rechaza.
+Desconectar elimina las credenciales locales; no revoca la sesión en Zed.
+
+El catálogo se consulta directamente en Zed y conserva el proveedor original
+de cada modelo. Los modelos manuales requieren seleccionarlo; la CLI calcula
+su protocolo interno automáticamente. Los IDs públicos son `ID-proveedor/ID-modelo`.
+Las firmas de razonamiento y el estado de llamadas Google se conservan en
+bloques Anthropic de estado opaco para continuar conversaciones con herramientas.
+Los tipos de contenido Google que el motor no puede representar se rechazan
+explícitamente. Las extensiones `anthropic-beta` no se transmiten por el envoltorio
+Zed y generan un aviso de adaptación. `/v1/messages/count_tokens` devuelve una
+estimación, identificada mediante `x-claude-proxy-token-count: estimated`.
+
+El adaptador anuncia la versión Zed `1.23.3`; el formulario de credenciales permite
+cambiarla si el servicio exige otra. Los fallos del proveedor y los streams sin
+final válido producen errores Anthropic. El soporte se verifica con servidores
+simulados; no implica una comprobación de tu suscripción o cuota real de Zed.
 
 ## Claude Code
 

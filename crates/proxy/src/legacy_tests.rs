@@ -61,6 +61,7 @@ impl Config {
                     bail!("URL de proveedor debe ser HTTP(S)");
                 }
                 providers.push(ProviderConfig {
+                    zed: None,
                     name: name.into(),
                     base,
                     key: get(

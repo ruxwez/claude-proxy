@@ -176,6 +176,7 @@ mod http {
             port: 1,
             timeout: Duration::from_secs(5),
             providers: vec![crate::ProviderConfig {
+                zed: None,
                 opencode: false,
                 name: "test".into(),
                 base: up,

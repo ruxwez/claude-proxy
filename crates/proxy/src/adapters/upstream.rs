@@ -15,6 +15,7 @@ pub use crate::domain::Protocol;
 pub use claude_proxy_engine::protocol_for_model as protocol;
 
 pub struct Provider {
+    zed: Option<crate::zed::Connection>,
     pub config: ProviderConfig,
     client: Client,
     user_agent: String,
@@ -30,7 +31,13 @@ impl Provider {
         user_agent: String,
         project: String,
     ) -> Self {
+        let zed = config
+            .zed
+            .as_ref()
+            .and_then(|z| z.credentials.clone())
+            .map(|auth| crate::zed::Connection::new(&config.base, auth, client.clone()));
         Self {
+            zed,
             client,
             user_agent,
             project,
@@ -38,6 +45,27 @@ impl Provider {
             session_prefix: format!("ses_{}", time_hex(true)),
             cache: AsyncMutex::new(None),
         }
+    }
+
+    pub async fn send(
+        &self,
+        protocol: Protocol,
+        headers: &HeaderMap,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
+        if self.config.zed.is_some() {
+            return self
+                .zed
+                .as_ref()
+                .context("Conecta tu cuenta Zed desde el CLI")?
+                .send(reqwest::Method::POST, "/completions", Some(body))
+                .await;
+        }
+        self.post(protocol, headers)
+            .json(body)
+            .send()
+            .await
+            .context("Proveedor no alcanzable")
     }
 
     pub async fn models(&self, refresh: bool) -> Result<Vec<Value>> {
