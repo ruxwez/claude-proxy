@@ -75,8 +75,12 @@ fn ps(s: &str) -> String {
 fn elevate(script: &str) -> Result<()> {
     use std::io::Write;
     let mut file = tempfile::Builder::new().suffix(".ps1").tempfile()?;
-    file.write_all(format!("$ErrorActionPreference='Stop'\ntry {{\n{script}\n}} catch {{ [Console]::Error.WriteLine('El gestor de servicios rechazó la operación'); exit 1 }}\n").as_bytes())?;
-    let path = ps(&file.path().to_string_lossy());
+    // PowerShell 5 needs a UTF-8 BOM for non-ASCII paths/values. Close the
+    // handle before another process opens the script on Windows.
+    file.write_all(format!("\u{feff}$ErrorActionPreference='Stop'\ntry {{\n{script}\n}} catch {{ [Console]::Error.WriteLine('El gestor de servicios rechazó la operación'); exit 1 }}\n").as_bytes())?;
+    file.as_file().sync_all()?;
+    let script_path = file.into_temp_path();
+    let path = ps(&script_path.to_string_lossy());
     let wrapper = format!(
         r#"$p=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent(); if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ & {path} }} else {{ $proc=Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+{path}+'"')); exit $proc.ExitCode }}"#
     );

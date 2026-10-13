@@ -69,7 +69,7 @@ def main():
         finally:
             subprocess.run([str(binary), "service", "stop"], check=False, timeout=60)
             if os.name == "nt":
-                subprocess.run(["sc.exe", "delete", "claude-proxy"], check=True)
+                subprocess.run(["sc.exe", "delete", "claude-proxy"], check=False)
             elif sys.platform == "darwin":
                 subprocess.run(["sudo", "rm", "-f", "/Library/LaunchDaemons/com.claude-proxy.server.plist"], check=True)
             else:
