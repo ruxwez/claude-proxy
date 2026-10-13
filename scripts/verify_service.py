@@ -3,6 +3,7 @@
 Never run on a developer machine that already uses that service.
 """
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -52,11 +53,11 @@ def main():
             assert (data / "proxy.sqlite3").exists()
             # The persisted identity proves reinstall doesn't replace the DB.
             import sqlite3
-            with sqlite3.connect(data / "proxy.sqlite3") as db:
+            with closing(sqlite3.connect(data / "proxy.sqlite3")) as db:
                 identity = json.loads(db.execute("SELECT document FROM settings WHERE id=1").fetchone()[0])["host_id"]
             service(*install)
             wait_status(base, True)
-            with sqlite3.connect(data / "proxy.sqlite3") as db:
+            with closing(sqlite3.connect(data / "proxy.sqlite3")) as db:
                 assert json.loads(db.execute("SELECT document FROM settings WHERE id=1").fetchone()[0])["host_id"] == identity
             service("status")
             service("stop")

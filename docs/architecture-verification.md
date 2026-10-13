@@ -41,7 +41,7 @@ las pruebas con el proxy y CA del entorno gestionado.
   PostgreSQL y MySQL: inicialización sin CLI, autenticación de APIs y generación,
   aislamiento de la clave del gateway frente al proveedor, sincronización real
   de settings/modelos de Claude Code, conexión y clave recordadas, eliminación
-  de clave, rechazo sin modificar settings y persistencia tras reiniciar.
+  de clave, ayuda sin credenciales, bypass de proxies HTTP en loopback y rechazo sin modificar settings y persistencia tras reiniciar.
 - `scripts/verify_tui.py` en PTY real: flechas/Enter, configuración automática
   de SQLite, proveedor y clave oculta, modelo/protocolo, sincronización, trazas,
   cuenta/catálogo/modelo Zed, reinicio y restauración del terminal.
@@ -49,8 +49,9 @@ las pruebas con el proxy y CA del entorno gestionado.
   y macOS x86_64, incluyendo dispatcher, control de parada, registro/UAC
   y definiciones launchd.
 - Unidad systemd comprobada con su parser real, incluyendo rutas con espacios.
-- launchd en una VM macOS de CI: instalación, arranque automático, reinstalación
-  sin perder la identidad persistida, inicio, parada, reinicio y estado correctos.
+- Servicios nativos en VM de CI Linux/systemd, macOS/launchd y Windows/SCM:
+  instalación, arranque automático, reinstalación sin perder la identidad
+  persistida, inicio, parada, reinicio y estado correctos.
 - Paquete Linux release CLI + servidor y SHA-256 verificados.
 - Construcción real de la imagen Docker, ejecución sin root, `/health` y
   health check correcto; API sin clave rechazada con 401.
@@ -85,8 +86,9 @@ cargo test -p claude-proxy-server --locked remote_database_roundtrips -- --ignor
 
 ## Plataformas y límites
 
-El entorno actual no ejecuta Windows/macOS ni tiene systemd como PID 1. No se
-presenta la compilación cruzada como una prueba de arranque del servicio Windows.
+El workspace local no ejecuta Windows/macOS ni tiene systemd como PID 1. Los
+servicios de los tres sistemas se comprueban en VM nativas de CI; la compilación
+cruzada se usa como comprobación adicional.
 `ci.yml` ejecuta build, tests, Clippy y procesos reales en Windows, macOS y Linux;
 `verify_service.py` registra, reinstala, inicia, detiene, reinicia y consulta el
 servicio **solo en las VM desechables de CI**. No lo ejecutes sobre un equipo con

@@ -120,7 +120,12 @@ struct Args {
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
     timeout: u64,
     /// Credencial del proxy, nunca la clave del proveedor
-    #[arg(long, env = "CLAUDE_PROXY_API_KEY", default_value = "")]
+    #[arg(
+        long,
+        env = "CLAUDE_PROXY_API_KEY",
+        hide_env_values = true,
+        default_value = ""
+    )]
     api_key: String,
 }
 

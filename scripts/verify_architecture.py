@@ -87,6 +87,9 @@ def scenario(server, cli_bin, directory, provider_port, database_url=None):
             time.sleep(0.1)
         process.terminate()
         raise AssertionError("Startup timeout")
+    help_env=cli_env.copy()
+    help_env["CLAUDE_PROXY_API_KEY"]=GATEWAY_KEY
+    cli(cli_bin,help_env,"--help")
     process = start()
     try:
         for path in ["/api/status", "/api/settings", "/api/cli-config", "/v1/models"]:
