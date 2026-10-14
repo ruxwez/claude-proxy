@@ -51,6 +51,8 @@ struct Panel {
     sidebar: bool,
     menu: Option<Menu>,
     help: bool,
+    latest_version: Option<semver::Version>,
+    server_version: Option<String>,
 }
 impl Panel {
     async fn load(client: Client) -> Result<Self> {
@@ -76,8 +78,23 @@ impl Panel {
             sidebar: true,
             menu: None,
             help: false,
+            latest_version: None,
+            server_version: status["version"].as_str().map(String::from),
         };
         Ok(panel)
+    }
+    fn version_notice(&self) -> String {
+        self.latest_version
+            .as_ref()
+            .map(|latest| {
+                crate::updates::notices(
+                    latest,
+                    env!("CARGO_PKG_VERSION"),
+                    self.server_version.as_deref(),
+                )
+                .join("\n ")
+            })
+            .unwrap_or_default()
     }
     fn providers(&self) -> &[Value] {
         self.settings["providers"]
@@ -390,19 +407,7 @@ impl Panel {
                 return Ok(());
             }
             Action::TracePolicy => {
-                let enabled = boolean(0)?;
-                let hours = values[1].parse::<u64>()?;
-                let until = if values[2] == "CAPTURAR CONTENIDO" {
-                    Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + 3600)
-                } else {
-                    ensure!(
-                        values[2].is_empty(),
-                        "Escribe exactamente CAPTURAR CONTENIDO o deja vacío"
-                    );
-                    None
-                };
-                next["traces"] =
-                    json!({"enabled":enabled,"retention_hours":hours,"full_until":until});
+                next["traces"] = json!({"debug":boolean(0)?});
             }
             Action::Connection => {
                 let key = if values[2] == "true" {
@@ -428,7 +433,9 @@ impl Panel {
                 } else {
                     crate::control::configure(&values[0], key).await?
                 };
+                let latest = self.latest_version.take();
                 *self = Self::load(client).await?;
+                self.latest_version = latest;
                 self.tab = 4;
                 self.sidebar = false;
                 let mut sync = args.clone();
@@ -999,6 +1006,7 @@ impl Panel {
             }
             KeyCode::Char('c') if self.tab == 4 => {
                 let status = self.client.probe().await?;
+                self.server_version = status["version"].as_str().map(String::from);
                 self.message = format!(
                     "Servidor disponible · versión {}",
                     status["version"].as_str().unwrap_or("desconocida")
@@ -1016,6 +1024,9 @@ impl Panel {
                 let _ = ratatui::init();
                 input?;
                 self.message = result?;
+                if let Ok(status) = self.client.probe().await {
+                    self.server_version = status["version"].as_str().map(String::from);
+                }
             }
             KeyCode::Char('I' | 'D' | 'J' | 'V') if self.tab == 4 => {
                 // Leave raw/alternate mode for sudo/UAC and status output.
@@ -1036,27 +1047,12 @@ impl Panel {
             }
             KeyCode::Char('e') if self.tab == 3 => {
                 self.form = Some(Form {
-                    title: "Trazas · contenido completo requiere consentimiento por 1 hora",
-                    fields: vec![
-                        Field::choice(
-                            "Capturar trazas",
-                            self.settings["traces"]["enabled"]
-                                .as_bool()
-                                .unwrap_or(false),
-                            &["false", "true"],
-                        ),
-                        Field::new(
-                            "Retención: 1 a 168 horas",
-                            self.settings["traces"]["retention_hours"]
-                                .as_u64()
-                                .filter(|n| *n > 0)
-                                .unwrap_or(72),
-                        ),
-                        Field::new(
-                            "Consentimiento: CAPTURAR CONTENIDO (vacío: solo metadatos)",
-                            "",
-                        ),
-                    ],
+                    title: "Trazas · histórico de siete días",
+                    fields: vec![Field::choice(
+                        "Debug: todas las peticiones con contenido completo",
+                        self.settings["traces"]["debug"].as_bool().unwrap_or(false),
+                        &["false", "true"],
+                    )],
                     selected: 0,
                     action: Action::TracePolicy,
                 })
@@ -1121,9 +1117,17 @@ pub async fn run(client: Client, args: &crate::Args) -> Result<()> {
         "El panel necesita un terminal. Para sincronizar usa --sync"
     );
     let mut panel = Panel::load(client).await?;
+    // Discovery runs while the panel is usable. A network failure is optional.
+    let mut update_check = Some(tokio::spawn(crate::updates::latest()));
     let mut terminal = ratatui::init();
     let result = async {
         loop {
+            if update_check.as_ref().is_some_and(|task| task.is_finished())
+                && let Some(task) = update_check.take()
+                && let Ok(Ok(latest)) = task.await
+            {
+                panel.latest_version = Some(latest);
+            }
             panel.selected = panel.selected.min(panel.length().saturating_sub(1));
             terminal.draw(|frame| panel.draw(frame))?;
             if event::poll(Duration::from_millis(100))?
@@ -1167,6 +1171,9 @@ pub async fn run(client: Client, args: &crate::Args) -> Result<()> {
     }
     .await;
     ratatui::restore();
+    if let Some(task) = update_check {
+        task.abort();
+    }
     result
 }
 
@@ -1195,8 +1202,31 @@ mod tests {
             sidebar: true,
             menu: None,
             help: false,
+            latest_version: None,
+            server_version: None,
         }
     }
+    #[test]
+    fn new_cli_and_server_versions_remain_visible_when_messages_change() {
+        let mut panel = panel();
+        panel.latest_version = Some(semver::Version::parse("9.0.0").unwrap());
+        panel.server_version = Some("0.0.1".into());
+        panel.message = "Catálogo actualizado".into();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| panel.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Nueva versión del CLI:"));
+        assert!(rendered.contains("Nueva versión del servidor proxy:"));
+        assert!(rendered.contains("Catálogo actualizado"));
+    }
+
     #[test]
     fn renders_empty_panel_without_credentials() {
         let panel = panel();

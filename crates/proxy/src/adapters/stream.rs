@@ -20,9 +20,6 @@ fn frame(value: &Value) -> Bytes {
         value
     ))
 }
-fn error_frame(message: &str) -> Bytes {
-    frame(&json!({"type":"error","error":{"type":"api_error","message":message}}))
-}
 
 pub async fn zed_response(
     upstream: reqwest::Response,
@@ -32,7 +29,13 @@ pub async fn zed_response(
     capture: Option<crate::traces::Capture>,
 ) -> Result<Response> {
     let streaming = req["stream"].as_bool().unwrap_or(false);
+    if let Some(trace) = &capture {
+        trace.finish("conversion_error");
+    }
     let translator = claude_proxy_engine::zed::Stream::new(provider, &model, req)?;
+    if let Some(trace) = &capture {
+        trace.finish("cancelled");
+    }
     let wrapped = upstream
         .headers()
         .contains_key("x-zed-server-supports-status-messages");
@@ -41,7 +44,7 @@ pub async fn zed_response(
         if let Some(trace) = &capture { trace.finish("cancelled"); }
         let mut translator = translator;
         for event in translator.start() {
-            if let Some(trace) = &capture { trace.stage("client_event", &event); }
+            if let Some(trace) = &capture { trace.stage(if streaming { "client_event" } else { "proxy_event" }, &event); }
             yield event;
         }
         let mut decoder = claude_proxy_engine::zed::Decoder::new(wrapped);
@@ -52,14 +55,18 @@ pub async fn zed_response(
         loop {
             let chunk = tokio::select! {
                 chunk = source.next() => chunk,
-                _ = keepalive.tick() => { yield json!({"type":"ping"}); continue; }
+                _ = keepalive.tick() => {
+                    let event = json!({"type":"ping"});
+                    if streaming && let Some(trace) = &capture { trace.stage("client_event", &event); }
+                    yield event; continue;
+                }
             };
             let eof = chunk.is_none();
             let bytes = chunk.transpose()?.unwrap_or_default();
             for raw in decoder.push(&bytes, eof)? {
                 if let Some(trace) = &capture { trace.stage("upstream_event", &raw); }
                 for event in translator.accept(&raw)? {
-                    if let Some(trace) = &capture { trace.stage("client_event", &event); }
+                    if let Some(trace) = &capture { trace.stage(if streaming { "client_event" } else { "proxy_event" }, &event); }
                     if event["type"] == "error" { Err(anyhow::anyhow!("Zed: {}", event["error"]["message"].as_str().unwrap_or("error del proveedor")))?; }
                     yield event;
                 }
@@ -67,7 +74,7 @@ pub async fn zed_response(
             if eof { break; }
         }
         for event in translator.finish()? {
-            if let Some(trace) = &capture { trace.stage("client_event", &event); }
+            if let Some(trace) = &capture { trace.stage(if streaming { "client_event" } else { "proxy_event" }, &event); }
             yield event;
         }
         if let Some(trace) = &capture { trace.finish("completed"); }
@@ -77,10 +84,12 @@ pub async fn zed_response(
             Ok::<_, Infallible>(match result {
                 Ok(value) => frame(&value),
                 Err(error) => {
+                    let event = json!({"type":"error","error":{"type":"api_error","message":format!("{error:#}")}});
                     if let Some(trace) = &failure_capture {
                         trace.finish("stream_error");
+                        trace.stage("client_event", &event);
                     }
-                    error_frame(&format!("{error:#}"))
+                    frame(&event)
                 }
             })
         }));
@@ -148,6 +157,9 @@ pub fn response_traced(
     req: &Value,
     capture: Option<crate::traces::Capture>,
 ) -> Response {
+    if let Some(trace) = &capture {
+        trace.finish("cancelled");
+    }
     let translator = Translator::with_request(protocol, &model, req);
     let failure_capture = capture.clone();
     let stream = async_stream::try_stream! {
@@ -179,7 +191,7 @@ pub fn response_traced(
             let eof = chunk.is_none();
             let bytes = chunk.transpose()?.unwrap_or_default();
             for data in decoder.push(&bytes, eof)? {
-                if let Some(trace) = &capture { trace.stage("upstream_event", &serde_json::from_str::<Value>(&data).unwrap_or(Value::Null)); }
+                if let Some(trace) = &capture { trace.stage("upstream_event", &serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data))); }
                 for event in translator.accept(&data)? {
                     if let Some(trace) = &capture { trace.stage("client_event", &event); }
                     if event["type"] == "error" {
@@ -203,12 +215,13 @@ pub fn response_traced(
         Ok::<_, Infallible>(match result {
             Ok(bytes) => bytes,
             Err(error) => {
+                let event = json!({"type":"error","error":{"type":"api_error","message":format!("{error:#}")}});
                 if let Some(trace) = &failure_capture {
                     trace.finish("stream_error");
-                    trace.stage("client_event", &json!({"type":"error"}));
+                    trace.stage("client_event", &event);
                 }
                 tracing::warn!(error = %error, cause = %error.root_cause(), "Streaming del proveedor interrumpido");
-                error_frame(&format!("{error:#}"))
+                frame(&event)
             }
         })
     }));

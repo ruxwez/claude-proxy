@@ -134,9 +134,9 @@ def main():
             send("\x1b")  # Return to sidebar; separate Esc from arrow escape sequences.
             send("\x1b[B\x1b[B\r")  # Sidebar -> traces.
             send("\r\r")  # Actions -> configure capture.
-            wait_for(lambda: shown("Consentimiento"))
-            send("\x1b[C\r\r\r\r")  # Enable with arrows -> fields -> Save.
-            wait_for(lambda: get(endpoint + "/api/settings")["traces"]["enabled"] is True)
+            wait_for(lambda: shown("Debug: todas"))
+            send("\x1b[C\r\r")  # Enable debug with arrows -> Save.
+            wait_for(lambda: get(endpoint + "/api/settings")["traces"]["debug"] is True)
             send("\x1b")
             send("\x1b[A\x1b[A\x1b[A\r")  # Sidebar -> providers.
             send("\r\x1b[F" + "\x1b[A" * 4 + "\r")  # Actions -> Add provider.

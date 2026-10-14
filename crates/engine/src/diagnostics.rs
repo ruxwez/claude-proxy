@@ -2,27 +2,60 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// A seven-day rolling window applies to both modes.
+pub const TRACE_RETENTION_SECONDS: u64 = 7 * 24 * 3600;
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TracePolicy {
-    pub enabled: bool,
-    /// Explicit consent expires; full capture cannot silently stay enabled.
-    pub full_until: Option<u64>,
-    pub retention_hours: u64,
+    /// Full payloads for every request; false persists only failed requests.
+    pub debug: bool,
 }
-impl TracePolicy {
-    pub fn validate(&self, now: u64) -> anyhow::Result<()> {
-        anyhow::ensure!(self.retention_hours <= 168, "Retención máxima: 168 horas");
-        anyhow::ensure!(
-            !self.enabled || self.retention_hours > 0,
-            "Indica la retención de las trazas"
-        );
-        anyhow::ensure!(
-            self.full_until.is_none_or(|until| until <= now + 86400),
-            "Consentimiento de captura completa: máximo 24 horas"
-        );
-        Ok(())
+
+/// Declarative changes by JSON Pointer. Values must already be redacted.
+pub fn differences(before: &Value, after: &Value) -> Value {
+    fn visit(path: &str, before: &Value, after: &Value, changes: &mut Vec<Value>) {
+        match (before, after) {
+            (Value::Object(a), Value::Object(b)) => {
+                let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).collect();
+                for key in keys {
+                    let path = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                    match (a.get(key), b.get(key)) {
+                        (Some(a), Some(b)) => visit(&path, a, b, changes),
+                        (Some(a), None) => {
+                            changes.push(json!({"path":path,"change":"removed","before":a}))
+                        }
+                        (None, Some(b)) => {
+                            changes.push(json!({"path":path,"change":"added","after":b}))
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            (Value::Array(a), Value::Array(b)) => {
+                for index in 0..a.len().max(b.len()) {
+                    let path = format!("{path}/{index}");
+                    match (a.get(index), b.get(index)) {
+                        (Some(a), Some(b)) => visit(&path, a, b, changes),
+                        (Some(a), None) => {
+                            changes.push(json!({"path":path,"change":"removed","before":a}))
+                        }
+                        (None, Some(b)) => {
+                            changes.push(json!({"path":path,"change":"added","after":b}))
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            _ if before != after => {
+                changes.push(json!({"path":path,"change":"modified","before":before,"after":after}))
+            }
+            _ => {}
+        }
     }
+    let mut changes = Vec::new();
+    visit("", before, after, &mut changes);
+    json!(changes)
 }
 
 /// Only controlled labels and counters; arbitrary JSON keys/values never escape.
@@ -268,6 +301,26 @@ pub fn compare_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn differences_distinguish_null_missing_arrays_and_escaped_pointers() {
+        let changes = differences(
+            &json!({"a/b":{"~key":1},"items":[1,null],"gone":null}),
+            &json!({"a/b":{"~key":2},"items":[1],"new":null}),
+        );
+        assert_eq!(
+            changes,
+            json!([
+                {"path":"/a~1b/~0key","change":"modified","before":1,"after":2},
+                {"path":"/gone","change":"removed","before":null},
+                {"path":"/items/1","change":"removed","before":null},
+                {"path":"/new","change":"added","after":null}
+            ])
+        );
+        assert_eq!(
+            differences(&json!({"same":1}), &json!({"same":1})),
+            json!([])
+        );
+    }
     #[test]
     fn google_observations_count_native_tools_thoughts_media_and_tokens_without_content() {
         let raw = json!({"contents":[{"parts":[{"functionCall":{"name":"private-tool","args":{"q":"private-input"}}},{"functionResponse":{"name":"private-tool","response":{"text":"private-result"}}},{"thought":true,"text":"private-thought","thoughtSignature":"private-signature"},{"inlineData":{"mimeType":"image/png","data":"private-image"}},{"inlineData":{"mimeType":"application/pdf","data":"private-file"}}]}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":3,"cachedContentTokenCount":5,"thoughtsTokenCount":7}});

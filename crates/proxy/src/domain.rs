@@ -108,11 +108,6 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
-        self.traces.validate(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs(),
-        )?;
         ensure!(
             (1..=3600).contains(&self.timeout_seconds),
             "Timeout entre 1 y 3600 segundos"

@@ -555,6 +555,14 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, mut request: Request) -> 
             .unwrap();
     }
     if request.uri().path() != "/health" && !app.auth.accepts(request.headers()) {
+        if matches!(
+            request.uri().path(),
+            "/v1/messages" | "/v1/messages/count_tokens"
+        ) {
+            let path = request.uri().path().to_string();
+            // Reject authentication before reading the body, as before.
+            return trace_rejection(app, &path, None, unauthorized(), "authentication_error").await;
+        }
         return unauthorized();
     }
     // Strip incoming gateway credentials even when authentication is disabled.
@@ -568,12 +576,29 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, mut request: Request) -> 
         let (parts, body) = request.into_parts();
         let bytes = match to_bytes(body, 32 * 1024 * 1024).await {
             Ok(b) => b,
-            Err(e) => return failure(e).into_response(),
+            Err(e) => {
+                return trace_rejection(
+                    app,
+                    parts.uri.path(),
+                    None,
+                    failure(e).into_response(),
+                    "invalid_request",
+                )
+                .await;
+            }
         };
         if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
             && let Err(error) = oauth::refresh(app, value["model"].as_str().unwrap_or("")).await
         {
-            return (StatusCode::BAD_GATEWAY, Json(json!({"type":"error","error":{"type":"authentication_error","message":error.to_string()}}))).into_response();
+            let response = (StatusCode::BAD_GATEWAY, Json(json!({"type":"error","error":{"type":"authentication_error","message":error.to_string()}}))).into_response();
+            return trace_rejection(
+                app,
+                parts.uri.path(),
+                Some(&bytes),
+                response,
+                "authentication_error",
+            )
+            .await;
         }
         request = Request::from_parts(parts, Body::from(bytes));
     }
@@ -591,6 +616,57 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, mut request: Request) -> 
         cached.as_ref().unwrap().1.clone()
     };
     route.oneshot(request).await.unwrap()
+}
+
+// Authentication/refresh failures happen before the provider router is invoked.
+async fn trace_rejection(
+    app: &Control,
+    path: &str,
+    bytes: Option<&[u8]>,
+    response: Response,
+    outcome: &str,
+) -> Response {
+    let (settings, _) = app.snapshot();
+    let Some(trace) = app
+        .traces
+        .as_ref()
+        .and_then(|traces| traces.start(&settings.traces))
+    else {
+        return response;
+    };
+    trace.operation(if path.ends_with("count_tokens") {
+        "count_tokens"
+    } else {
+        "messages"
+    });
+    if let Some(bytes) = bytes {
+        trace.stage(
+            "client_request",
+            &serde_json::from_slice::<Value>(bytes)
+                .unwrap_or_else(|_| json!(String::from_utf8_lossy(bytes))),
+        );
+    } else {
+        trace.omitted_stage(
+            "client_request",
+            if outcome == "authentication_error" {
+                "authentication_rejected_before_body"
+            } else {
+                "request_body_unavailable"
+            },
+        );
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+    trace.stage(
+        "client_response",
+        &serde_json::from_slice::<Value>(&bytes)
+            .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+    );
+    trace.finish(outcome);
+    parts
+        .headers
+        .insert("x-claude-proxy-trace-id", trace.id().parse().unwrap());
+    Response::from_parts(parts, Body::from(bytes))
 }
 
 fn unauthorized() -> Response {

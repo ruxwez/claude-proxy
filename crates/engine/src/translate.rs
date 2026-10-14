@@ -196,10 +196,23 @@ fn image(block: &Value) -> Result<String> {
     }
 }
 
+const GPT5_EFFORTS: &[&str] = &["minimal", "low", "medium", "high"];
+const BASIC_EFFORTS: &[&str] = &["low", "medium", "high"];
+const EXTENDED_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+const MAX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const DEEPSEEK_EFFORTS: &[&str] = &["low", "high", "max"];
+const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "max"];
+
+struct ReasoningPolicy {
+    efforts: &'static [&'static str],
+    supports_none: bool,
+    responses_tools: bool,
+}
+
 // A small, conservative translation policy, not model discovery. Unknown IDs
 // (including custom aliases and non-OpenAI providers) keep the generic mapping.
 // Exact IDs and dated snapshots are accepted; e.g. gpt-5-chat-latest is not gpt-5.
-fn reasoning_model(model: &str) -> Option<(&'static str, bool, bool)> {
+fn reasoning_model(model: &str) -> Option<ReasoningPolicy> {
     let matches = |id: &str| {
         model == id
             || model.strip_prefix(id).is_some_and(|suffix| {
@@ -214,21 +227,21 @@ fn reasoning_model(model: &str) -> Option<(&'static str, bool, bool)> {
                     })
             })
     };
-    // (highest effort, supports none, requires Responses for reasoning + tools)
+    // (supported efforts, supports none, requires Responses for reasoning + tools)
     for (ids, policy) in [
         (
             &["o1", "o3", "o3-mini", "o4-mini"][..],
-            ("high", false, false),
+            (BASIC_EFFORTS, false, false),
         ),
         (
             &["gpt-5", "gpt-5-mini", "gpt-5-nano"][..],
-            ("high", false, false),
+            (GPT5_EFFORTS, false, false),
         ),
-        (&["gpt-5.1"][..], ("high", true, false)),
-        (&["gpt-5.2"][..], ("xhigh", true, false)),
+        (&["gpt-5.1"][..], (BASIC_EFFORTS, true, false)),
+        (&["gpt-5.2"][..], (EXTENDED_EFFORTS, true, false)),
         (
             &["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"][..],
-            ("xhigh", true, true),
+            (EXTENDED_EFFORTS, true, true),
         ),
         (
             &[
@@ -238,15 +251,44 @@ fn reasoning_model(model: &str) -> Option<(&'static str, bool, bool)> {
                 "gpt-6-sol",
                 "gpt-6-luna",
             ][..],
-            ("max", true, true),
+            (MAX_EFFORTS, true, true),
         ),
-        (&["gpt-6-astra", "gpt-6.1-sol"][..], ("max", false, true)),
+        (
+            &["gpt-6-astra", "gpt-6.1-sol"][..],
+            (MAX_EFFORTS, false, true),
+        ),
     ] {
         if ids.iter().any(|id| matches(id)) {
-            return Some(policy);
+            return Some(ReasoningPolicy {
+                efforts: policy.0,
+                supports_none: policy.1,
+                responses_tools: policy.2,
+            });
         }
     }
     None
+}
+
+// Ordered ordinary levels. `max` is an explicit provider mode, never a
+// candidate for nearest-neighbour adaptation. Ties prefer the higher level.
+const EFFORT_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "ultra"];
+
+pub fn nearest_effort<'a>(requested: &str, supported: &'a [&'a str]) -> Option<&'a str> {
+    if supported.contains(&requested) {
+        return supported.iter().copied().find(|level| *level == requested);
+    }
+    let position = EFFORT_LEVELS.iter().position(|level| *level == requested)?;
+    supported
+        .iter()
+        .copied()
+        .filter_map(|level| {
+            let index = EFFORT_LEVELS
+                .iter()
+                .position(|candidate| *candidate == level)?;
+            Some((level, (index.abs_diff(position), std::cmp::Reverse(index))))
+        })
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(level, _)| level)
 }
 
 fn reasoning(req: &Value, model: &str, protocol: Protocol, out: &mut Value) -> Result<()> {
@@ -259,11 +301,8 @@ fn reasoning(req: &Value, model: &str, protocol: Protocol, out: &mut Value) -> R
                 .as_str()
                 .or_else(|| req["effort"].as_str());
             if let Some(effort) = effort {
-                out["reasoning_effort"] = json!(match effort {
-                    "low" | "minimal" => "low",
-                    "max" | "ultra" => "max",
-                    _ => "high",
-                });
+                out["reasoning_effort"] =
+                    json!(nearest_effort(effort, DEEPSEEK_EFFORTS).unwrap_or("high"));
             }
             out.as_object_mut().unwrap().remove("temperature");
             ensure!(
@@ -273,11 +312,11 @@ fn reasoning(req: &Value, model: &str, protocol: Protocol, out: &mut Value) -> R
         }
         return Ok(());
     }
-    let Some((highest, supports_none, responses_tools)) = reasoning_model(model) else {
+    let Some(policy) = reasoning_model(model) else {
         return Ok(());
     };
     let effort = if req["thinking"]["type"] == "disabled" {
-        supports_none.then_some("none")
+        policy.supports_none.then_some("none")
     } else {
         // budget_tokens is a hard Anthropic budget, not an effort level. An
         // explicit enabled/adaptive mode without effort uses medium instead;
@@ -286,11 +325,9 @@ fn reasoning(req: &Value, model: &str, protocol: Protocol, out: &mut Value) -> R
             .as_str()
             .or_else(|| req["effort"].as_str())
         {
-            Some("low") => Some("low"),
-            Some("medium") => Some("medium"),
-            Some("high") => Some("high"),
-            Some("xhigh") => Some(if highest == "high" { "high" } else { "xhigh" }),
-            Some("max") => Some(highest),
+            // Preserve explicit max's existing provider-specific behavior.
+            Some("max") => policy.efforts.last().copied(),
+            Some(level) if EFFORT_LEVELS.contains(&level) => nearest_effort(level, policy.efforts),
             _ if matches!(
                 req["thinking"]["type"].as_str(),
                 Some("enabled" | "adaptive")
@@ -304,9 +341,9 @@ fn reasoning(req: &Value, model: &str, protocol: Protocol, out: &mut Value) -> R
     let has_tools = req["tools"].as_array().is_some_and(|t| !t.is_empty());
     ensure!(
         protocol != Protocol::Chat
-            || !responses_tools
+            || !policy.responses_tools
             || !has_tools
-            || (supports_none && effort == Some("none")),
+            || (policy.supports_none && effort == Some("none")),
         "{model} requiere el protocolo Responses para herramientas con razonamiento; selecciona Responses para este modelo en el CLI"
     );
     if let Some(effort) = effort {
@@ -324,10 +361,29 @@ fn reasoning(req: &Value, model: &str, protocol: Protocol, out: &mut Value) -> R
     Ok(())
 }
 
+fn normalize_claude_effort(body: &mut Value) {
+    for path in ["/output_config/effort", "/effort"] {
+        if let Some(value) = body.pointer_mut(path)
+            && let Some(level) = value.as_str()
+            && let Some(mapped) = nearest_effort(level, CLAUDE_EFFORTS)
+        {
+            *value = json!(mapped);
+        }
+    }
+}
+
 pub fn request(req: &Value, model: &str, protocol: Protocol) -> Result<Value> {
     if protocol == Protocol::Messages {
         let mut body = req.clone();
         body["model"] = json!(model);
+        if model.starts_with("claude-") {
+            normalize_claude_effort(&mut body);
+            if let Some(messages) = body["messages"].as_array_mut() {
+                for message in messages {
+                    normalize_claude_effort(message);
+                }
+            }
+        }
         // A model/protocol switch must not send our transport capsules to an
         // Anthropic-compatible provider as if they were native redactions.
         if let Some(messages) = body["messages"].as_array_mut() {
@@ -729,12 +785,24 @@ fn validate_portable(req: &Value) -> Result<()> {
 
 // Report unavoidable adaptations without putting synthetic instructions in the prompt.
 pub fn warnings(req: &Value, model: &str, protocol: Protocol) -> Vec<&'static str> {
-    if protocol == Protocol::Messages {
-        return vec![];
-    }
     let mut out = Vec::new();
-    if req["output_config"]["effort"] == "ultra" || req["effort"] == "ultra" {
-        out.push("ultra_is_not_a_provider_effort");
+    let efforts = if protocol == Protocol::Messages && model.starts_with("claude-") {
+        Some(CLAUDE_EFFORTS)
+    } else if protocol == Protocol::Chat && deepseek(model) {
+        Some(DEEPSEEK_EFFORTS)
+    } else {
+        reasoning_model(model).map(|policy| policy.efforts)
+    };
+    if let Some(level) = req["output_config"]["effort"]
+        .as_str()
+        .or_else(|| req["effort"].as_str())
+        && let Some(efforts) = efforts
+        && nearest_effort(level, efforts).is_some_and(|mapped| mapped != level)
+    {
+        out.push("effort_adapted_to_supported_level");
+    }
+    if protocol == Protocol::Messages {
+        return out;
     }
     if req["thinking"].get("budget_tokens").is_some() {
         out.push("thinking_budget_uses_effort");
@@ -743,7 +811,7 @@ pub fn warnings(req: &Value, model: &str, protocol: Protocol) -> Vec<&'static st
         out.push("thinking_control_not_supported_for_model");
     }
     if req["thinking"]["type"] == "disabled"
-        && reasoning_model(model).is_some_and(|(_, none, _)| !none)
+        && reasoning_model(model).is_some_and(|policy| !policy.supports_none)
     {
         out.push("thinking_cannot_be_disabled");
     }
@@ -1256,4 +1324,144 @@ pub fn estimated_tokens(req: &Value) -> usize {
     (size(&req["system"]) + size(&req["messages"]) + size(&req["tools"]))
         .div_ceil(4)
         .max(1)
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    #[test]
+    fn nearest_level_works_in_both_directions_and_excludes_max() {
+        assert_eq!(
+            nearest_effort("xhigh", &["low", "high", "max"]),
+            Some("high")
+        );
+        assert_eq!(
+            nearest_effort("high", &["low", "xhigh", "max"]),
+            Some("xhigh")
+        );
+        assert_eq!(
+            nearest_effort("medium", &["low", "high", "max"]),
+            Some("high")
+        );
+        assert_eq!(
+            nearest_effort("ultra", &["high", "xhigh", "max"]),
+            Some("xhigh")
+        );
+        assert_eq!(nearest_effort("high", &["max"]), None);
+        assert_eq!(nearest_effort("max", &["high", "xhigh"]), None);
+        assert_eq!(nearest_effort("max", &["high", "max"]), Some("max"));
+        assert_eq!(nearest_effort("dynamic", &["low", "high"]), None);
+    }
+
+    #[test]
+    fn provider_requests_use_supported_levels_and_preserve_explicit_max_behavior() {
+        for (model, protocol, field, requested, expected) in [
+            (
+                "deepseek-v4.1-flash",
+                Protocol::Chat,
+                "/reasoning_effort",
+                "xhigh",
+                "high",
+            ),
+            (
+                "deepseek-v4.1-flash",
+                Protocol::Chat,
+                "/reasoning_effort",
+                "medium",
+                "high",
+            ),
+            (
+                "deepseek-v4.1-flash",
+                Protocol::Chat,
+                "/reasoning_effort",
+                "ultra",
+                "high",
+            ),
+            (
+                "deepseek-v4.1-flash",
+                Protocol::Chat,
+                "/reasoning_effort",
+                "max",
+                "max",
+            ),
+            (
+                "gpt-5",
+                Protocol::Responses,
+                "/reasoning/effort",
+                "minimal",
+                "minimal",
+            ),
+            (
+                "gpt-5",
+                Protocol::Responses,
+                "/reasoning/effort",
+                "xhigh",
+                "high",
+            ),
+            (
+                "gpt-5.2",
+                Protocol::Responses,
+                "/reasoning/effort",
+                "ultra",
+                "xhigh",
+            ),
+            (
+                "gpt-6.1-sol",
+                Protocol::Responses,
+                "/reasoning/effort",
+                "ultra",
+                "xhigh",
+            ),
+            (
+                "gpt-6.1-sol",
+                Protocol::Responses,
+                "/reasoning/effort",
+                "max",
+                "max",
+            ),
+            (
+                "claude-opus-4-6",
+                Protocol::Messages,
+                "/output_config/effort",
+                "xhigh",
+                "high",
+            ),
+            (
+                "claude-opus-4-6",
+                Protocol::Messages,
+                "/output_config/effort",
+                "ultra",
+                "high",
+            ),
+            (
+                "claude-opus-4-6",
+                Protocol::Messages,
+                "/output_config/effort",
+                "max",
+                "max",
+            ),
+        ] {
+            let req = json!({"model":model,"max_tokens":64,"thinking":{"type":"adaptive"},"output_config":{"effort":requested},"messages":[{"role":"user","content":"hi"}]});
+            assert_eq!(
+                request(&req, model, protocol)
+                    .unwrap()
+                    .pointer(field)
+                    .unwrap(),
+                expected,
+                "{model} {requested}"
+            );
+            assert_eq!(req["output_config"]["effort"], requested);
+        }
+    }
+
+    #[test]
+    fn claude_history_and_top_level_alias_use_the_same_mapping() {
+        let req = json!({"model":"claude-test","effort":"xhigh","messages":[{"role":"system","content":[],"output_config":{"effort":"ultra"}},{"role":"user","content":"hi"}]});
+        let body = request(&req, "claude-test", Protocol::Messages).unwrap();
+        assert_eq!(body["effort"], "high");
+        assert_eq!(body["messages"][0]["output_config"]["effort"], "high");
+        let unknown = request(&req, "custom-model", Protocol::Messages).unwrap();
+        assert_eq!(unknown["effort"], "xhigh");
+    }
 }

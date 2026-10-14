@@ -175,16 +175,18 @@ async fn serve(args: Args) -> Result<()> {
         .with_graceful_shutdown(async move {
             let _ = first.changed().await;
         });
-    let rest = axum::serve(admin, management::router_with_control(app)).with_graceful_shutdown(
-        async move {
+    let rest = axum::serve(admin, management::router_with_control(app.clone()))
+        .with_graceful_shutdown(async move {
             let _ = second.changed().await;
-        },
-    );
+        });
     let signal = async move {
         shutdown().await;
         let _ = stop.send(true);
     };
     let (a, b, _) = tokio::join!(api, rest, signal);
+    if let Some(traces) = app.traces.clone() {
+        tokio::task::spawn_blocking(move || traces.flush()).await??;
+    }
     a?;
     b?;
     Ok(())
