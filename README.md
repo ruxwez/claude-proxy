@@ -196,6 +196,13 @@ las APIs propias requieren URL. Cada modelo selecciona explícitamente `chat`,
 `responses` o `messages`. ChatGPT utiliza suscripción con Responses; Google utiliza
 Chat Completions. La API conserva las claves cuando el formulario envía `null`.
 
+ChatGPT recibe siempre `stream: true`; cuando Claude Code pide una respuesta sin
+streaming, el proxy reconstruye el mensaje Anthropic en JSON. El conteo de tokens
+de las suscripciones se estima localmente y se identifica con la cabecera
+`x-claude-proxy-token-count: estimated`, porque su endpoint de conteo no está
+autorizado. Los errores de sobrecarga recibidos en SSE se devuelven como
+`overloaded_error` y quedan registrados como fallos del proveedor.
+
 El catálogo coteja IDs exactos con models.dev y obtiene de allí nombres, límites,
 precios y capacidades. No descarta modelos desconocidos. Los modelos manuales o
 retirados del catálogo permanecen configurables. Los fallos de catálogo no impiden

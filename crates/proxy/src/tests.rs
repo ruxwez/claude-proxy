@@ -743,13 +743,14 @@ mod translation {
             .collect();
         assert_eq!(indexes, vec![0, 1, 2]);
         assert!(state.finish().is_err());
-        assert!(
+        assert_eq!(
             state
                 .accept(
                     &json!({"type":"response.failed","response":{"error":{"message":"failed"}}})
                         .to_string()
                 )
-                .is_err()
+                .unwrap()[0]["error"]["message"],
+            "failed"
         );
     }
 
@@ -1269,10 +1270,11 @@ mod translation {
         }
         let mut state = Translator::new(Protocol::Chat);
         state.accept("[DONE]").unwrap();
-        assert!(
+        assert_eq!(
             state
                 .accept(&json!({"error":{"message":"late error"}}).to_string())
-                .is_err()
+                .unwrap()[0]["error"]["message"],
+            "late error"
         );
         assert!(state.finish().is_err());
         let mut state = Translator::new(Protocol::Responses);

@@ -21,6 +21,64 @@ fn frame(value: &Value) -> Bytes {
     ))
 }
 
+// Subscription gateways require SSE even when the Anthropic client wants JSON.
+// Reuse the streaming translator so tool calls, reasoning and stops stay identical.
+pub async fn collected_response(
+    upstream: reqwest::Response,
+    protocol: Protocol,
+    model: String,
+    req: &Value,
+    capture: Option<crate::traces::Capture>,
+) -> Result<Response> {
+    let response = response_traced(upstream, protocol, model, req, capture.clone());
+    let mut source = response.into_body().into_data_stream();
+    let mut decoder = Decoder::default();
+    let mut collector = claude_proxy_engine::zed::Collector::default();
+    let mut size = 0;
+    let result: Result<Response> = async {
+        loop {
+            let chunk = source.next().await.transpose()?;
+            let eof = chunk.is_none();
+            let bytes = chunk.unwrap_or_default();
+            size += bytes.len();
+            anyhow::ensure!(
+                size <= 32 * 1024 * 1024,
+                "Respuesta del proveedor demasiado grande"
+            );
+            for data in decoder.push(&bytes, eof)? {
+                let event: Value = serde_json::from_str(&data)?;
+                if event["type"] == "error" {
+                    let status = match event["error"]["type"].as_str().unwrap_or("") {
+                        "overloaded_error" => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "rate_limit_error" => axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        "authentication_error" => axum::http::StatusCode::UNAUTHORIZED,
+                        "invalid_request_error" => axum::http::StatusCode::BAD_REQUEST,
+                        _ => axum::http::StatusCode::BAD_GATEWAY,
+                    };
+                    return Ok((status, axum::Json(event)).into_response());
+                }
+                collector.accept(&event)?;
+            }
+            if eof {
+                break;
+            }
+        }
+        let message = collector.finish()?;
+        if let Some(trace) = &capture {
+            trace.stage("client_response", &message);
+            trace.finish("completed");
+        }
+        Ok(axum::Json(message).into_response())
+    }
+    .await;
+    if result.is_err()
+        && let Some(trace) = &capture
+    {
+        trace.finish("conversion_error");
+    }
+    result
+}
+
 pub async fn zed_response(
     upstream: reqwest::Response,
     provider: claude_proxy_engine::zed::Provider,
@@ -157,6 +215,11 @@ pub fn response_traced(
     req: &Value,
     capture: Option<crate::traces::Capture>,
 ) -> Response {
+    let event_stage = if req["stream"].as_bool().unwrap_or(false) {
+        "client_event"
+    } else {
+        "proxy_event"
+    };
     if let Some(trace) = &capture {
         trace.finish("cancelled");
     }
@@ -168,7 +231,7 @@ pub fn response_traced(
         let native = protocol == Protocol::Messages;
         if !native {
             let event = json!({"type":"message_start","message":{"id":format!("msg_{}",uuid::Uuid::new_v4().simple()),"type":"message","role":"assistant","model":model,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}});
-            if let Some(trace) = &capture { trace.stage("client_event", &event); }
+            if let Some(trace) = &capture { trace.stage(event_stage, &event); }
             yield frame(&event);
         }
         let mut decoder = Decoder::default();
@@ -183,7 +246,7 @@ pub fn response_traced(
                 chunk = source.next() => chunk,
                 _ = keepalive.tick() => {
                     let event = json!({"type":"ping"});
-                    if let Some(trace) = &capture { trace.stage("client_event", &event); }
+                    if let Some(trace) = &capture { trace.stage(event_stage, &event); }
                     yield frame(&event);
                     continue;
                 }
@@ -193,7 +256,7 @@ pub fn response_traced(
             for data in decoder.push(&bytes, eof)? {
                 if let Some(trace) = &capture { trace.stage("upstream_event", &serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data))); }
                 for event in translator.accept(&data)? {
-                    if let Some(trace) = &capture { trace.stage("client_event", &event); }
+                    if let Some(trace) = &capture { trace.stage(event_stage, &event); }
                     if event["type"] == "error" {
                         if let Some(trace) = &capture { trace.finish("upstream_error"); }
                         yield frame(&event);
@@ -205,7 +268,7 @@ pub fn response_traced(
             if eof { break; }
         }
         for event in translator.finish()? {
-            if let Some(trace) = &capture { trace.stage("client_event", &event); }
+            if let Some(trace) = &capture { trace.stage(event_stage, &event); }
             yield frame(&event);
         }
         if let Some(trace) = &capture { trace.finish("completed"); }
@@ -218,7 +281,7 @@ pub fn response_traced(
                 let event = json!({"type":"error","error":{"type":"api_error","message":format!("{error:#}")}});
                 if let Some(trace) = &failure_capture {
                     trace.finish("stream_error");
-                    trace.stage("client_event", &event);
+                    trace.stage(event_stage, &event);
                 }
                 tracing::warn!(error = %error, cause = %error.root_cause(), "Streaming del proveedor interrumpido");
                 frame(&event)

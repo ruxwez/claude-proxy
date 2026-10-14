@@ -467,6 +467,9 @@ async fn messages_inner(
         stream::zed_response(upstream, provider, id.to_string(), &req, capture.clone()).await?
     } else if req["stream"].as_bool().unwrap_or(false) {
         stream::response_traced(upstream, protocol, id.to_string(), &req, capture.clone())
+    } else if body["stream"] == true {
+        stream::collected_response(upstream, protocol, id.to_string(), &req, capture.clone())
+            .await?
     } else {
         let bytes = read_limited(upstream, 32 * 1024 * 1024).await?;
         let decoded = serde_json::from_slice::<Value>(&bytes);
@@ -550,6 +553,14 @@ async fn count_tokens_inner(
         let protocol = selected_protocol(&provider.config.name, model, &proxy.protocols);
         if let Some(trace) = capture {
             trace.route(id, protocol);
+        }
+        // ChatGPT's subscription boundary does not authorize input_tokens.
+        // Do not send subscription credentials to an unsupported operation.
+        if proxy.subscriptions.contains(&provider.config.name) {
+            if let Some(trace) = capture {
+                trace.warnings(&["subscription_token_count_estimated_locally"]);
+            }
+            return Ok(estimated_count(&req));
         }
         if protocol != Protocol::Chat && provider.config.zed.is_none() {
             let body = translate::count_request(

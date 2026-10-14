@@ -1259,6 +1259,10 @@ fn tool_block(id: &str, name: &str, arguments: &Value) -> Result<Value> {
 
 /// Apply the subscription gateway's semantic restrictions outside network code.
 pub fn adapt_subscription_request(body: &mut Value, warnings: &mut Vec<&'static str>) {
+    if body["stream"] != true {
+        body["stream"] = json!(true);
+        warnings.push("subscription_requires_upstream_streaming");
+    }
     if body
         .as_object_mut()
         .is_some_and(|body| body.remove("safety_identifier").is_some())

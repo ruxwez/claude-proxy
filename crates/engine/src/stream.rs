@@ -425,8 +425,35 @@ impl Translator {
             self.terminal |= v["type"] == "message_stop" || v["type"] == "error";
             return Ok(vec![v]);
         }
-        if !v["error"].is_null() {
-            bail!("Error del proveedor durante streaming: {}", v["error"]);
+        if !v["error"].is_null() || v["type"] == "response.failed" || v["type"] == "error" {
+            let error = if v["type"] == "response.failed" {
+                &v["response"]["error"]
+            } else if !v["error"].is_null() {
+                &v["error"]
+            } else {
+                &v
+            };
+            let kind = match error["code"]
+                .as_str()
+                .or_else(|| error["type"].as_str())
+                .unwrap_or("")
+            {
+                "server_is_overloaded"
+                | "overloaded"
+                | "overloaded_error"
+                | "service_unavailable_error" => "overloaded_error",
+                "rate_limit_exceeded" | "rate_limit_error" | "insufficient_quota" => {
+                    "rate_limit_error"
+                }
+                "invalid_api_key" | "authentication_error" => "authentication_error",
+                "invalid_request_error" => "invalid_request_error",
+                _ => "api_error",
+            };
+            self.terminal = true;
+            self.failed = true;
+            return Ok(vec![
+                json!({"type":"error","error":{"type":kind,"message":error["message"].as_str().unwrap_or("Error del proveedor durante streaming")}}),
+            ]);
         }
         let mut events = Vec::new();
         if self.protocol == Protocol::Chat {
@@ -721,7 +748,6 @@ impl Translator {
                     self.terminal = true;
                     self.emit_tools(&mut events)?;
                 }
-                "response.failed" | "error" => bail!("Responses falló: {}", v["response"]["error"]),
                 // Only completed items contain replayable encrypted state.
                 "response.output_item.done" if v["item"]["type"] == "reasoning" => {
                     self.responses_reasoning(output, &v["item"], &mut events)?;

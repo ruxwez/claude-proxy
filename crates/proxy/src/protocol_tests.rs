@@ -113,7 +113,19 @@ mod http {
             return Json(json!({"input_tokens":42})).into_response();
         }
         if body["stream"] == true {
-            let data = if uri.path() == "/messages" {
+            let data = if body["model"] == "overloaded" {
+                format!(
+                    "data: {}\n\n",
+                    json!({"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2})
+                )
+            } else if body["model"] == "truncated" {
+                format!(
+                    "data: {}\n\n",
+                    json!({"type":"response.output_text.delta","delta":"partial"})
+                )
+            } else if body["model"] == "tool" {
+                [json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"x\":42}"}}),json!({"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":20,"output_tokens":8}}})].iter().map(|e|format!("data: {e}\n\n")).collect()
+            } else if uri.path() == "/messages" {
                 "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"native failure\",\"extra\":\"preserve\"}}\n\n".to_string()
             } else {
                 [json!({"type":"response.output_text.delta","delta":"hello 🛑"}),json!({"type":"response.output_text.delta","delta":"ENDrest"}),json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello 🛑ENDrest"}]}],"usage":{"input_tokens":20,"output_tokens":8}}})].iter().map(|e|format!("data: {e}\n\n")).collect()
@@ -193,6 +205,9 @@ mod http {
                 ("gpt-6.1-sol".into(), protocol),
                 ("gpt-6-astra".into(), protocol),
                 ("gpt-6-luna".into(), protocol),
+                ("overloaded".into(), protocol),
+                ("truncated".into(), protocol),
+                ("tool".into(), protocol),
             ]),
         };
         let subscriptions = if subscription {
@@ -203,6 +218,105 @@ mod http {
         let (base, task) =
             serve(crate::server::router_with_subscriptions(config, subscriptions).unwrap()).await;
         (base, calls, vec![up_task, task])
+    }
+
+    #[tokio::test]
+    async fn subscription_accepts_json_clients_and_reports_stream_failures() {
+        let (base, calls, tasks) = fixture_with_subscription(Protocol::Responses, true).await;
+        let client = reqwest::Client::new();
+        for stream in [None, Some(false), Some(true)] {
+            let mut req = request(json!("hello"));
+            req["model"] = json!("test/gpt-6.1-sol");
+            req["stop_sequences"] = json!(["🛑END"]);
+            if let Some(stream) = stream {
+                req["stream"] = json!(stream);
+            }
+            let response = client
+                .post(format!("{base}/v1/messages"))
+                .json(&req)
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            assert_eq!(calls.lock().unwrap().last().unwrap().2["stream"], true);
+            if stream == Some(true) {
+                let body = response.text().await.unwrap();
+                assert!(body.contains("message_stop"));
+                assert!(!body.contains("rest"));
+            } else {
+                assert_eq!(response.headers()["content-type"], "application/json");
+                let message: Value = response.json().await.unwrap();
+                assert_eq!(message["content"][0]["text"], "hello ");
+                assert_eq!(message["stop_reason"], "stop_sequence");
+                assert_eq!(message["stop_sequence"], "🛑END");
+                assert_eq!(message["usage"]["input_tokens"], 20);
+                assert_eq!(message["usage"]["output_tokens"], 8);
+            }
+        }
+        for (model, status, kind) in [
+            ("overloaded", 503, "overloaded_error"),
+            ("truncated", 502, "api_error"),
+        ] {
+            for stream in [false, true] {
+                let mut req = request(json!("hello"));
+                req["model"] = json!(format!("test/{model}"));
+                req["stream"] = json!(stream);
+                let response = client
+                    .post(format!("{base}/v1/messages"))
+                    .json(&req)
+                    .send()
+                    .await
+                    .unwrap();
+                if stream {
+                    assert_eq!(response.status().as_u16(), 200);
+                    let text = response.text().await.unwrap();
+                    assert!(text.contains(kind));
+                    assert!(!text.contains("message_stop"));
+                } else {
+                    assert_eq!(response.status().as_u16(), status);
+                    assert_eq!(
+                        response.json::<Value>().await.unwrap()["error"]["type"],
+                        kind
+                    );
+                }
+            }
+        }
+        let mut req = request(json!("hello"));
+        req["model"] = json!("test/tool");
+        req["tools"] = json!([{"name":"lookup","input_schema":{"type":"object","properties":{"x":{"type":"integer"}}}}]);
+        let message: Value = client
+            .post(format!("{base}/v1/messages"))
+            .json(&req)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(message["content"][0]["type"], "tool_use");
+        assert_eq!(message["content"][0]["input"], json!({"x":42}));
+        assert_eq!(message["stop_reason"], "tool_use");
+        let before = calls.lock().unwrap().len();
+        let response = client
+            .post(format!("{base}/v1/messages/count_tokens"))
+            .json(&req)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()["x-claude-proxy-token-count"],
+            "estimated"
+        );
+        assert!(
+            response.json::<Value>().await.unwrap()["input_tokens"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(calls.lock().unwrap().len(), before);
+        for task in tasks {
+            task.abort();
+        }
     }
 
     #[tokio::test]
@@ -263,6 +377,13 @@ mod http {
                     .await
                     .unwrap();
                 assert!(response.status().is_success());
+                if subscription {
+                    assert_eq!(
+                        response.headers()["x-claude-proxy-token-count"],
+                        "estimated"
+                    );
+                    continue;
+                }
                 let body = calls.lock().unwrap().last().unwrap().2.clone();
                 assert_eq!(
                     body["input"][0]["content"][0]
@@ -309,6 +430,7 @@ mod http {
                 let mut expected =
                     crate::translate::request(&req, "raw", Protocol::Responses).unwrap();
                 if subscription {
+                    expected["stream"] = json!(true);
                     expected
                         .as_object_mut()
                         .unwrap()
