@@ -74,6 +74,21 @@ async fn download_version(version: &str) -> Result<PathBuf> {
         .https_only(true)
         .build()?;
     println!("Descargando servidor v{} para {os}/{arch}…", version);
+    let directory = claude_proxy_service::local_directory()?.join("downloads");
+    let path = download_asset(&http, &base, &asset, &directory).await?;
+    ensure!(
+        binary_version(&path)? == semver::Version::parse(version)?,
+        "La versión del binario no coincide con la release"
+    );
+    Ok(path)
+}
+
+async fn download_asset(
+    http: &reqwest::Client,
+    base: &str,
+    asset: &str,
+    directory: &std::path::Path,
+) -> Result<PathBuf> {
     let sum=http.get(format!("{base}/{asset}.sha256")).send().await?.error_for_status().context("No hay una versión publicada accesible; instala claude-proxy-server con Cargo o coloca el ejecutable junto al CLI")?.text().await?;
     let expected = sum.split_whitespace().next().context("Checksum ausente")?;
     ensure!(
@@ -85,9 +100,8 @@ async fn download_version(version: &str) -> Result<PathBuf> {
         .send()
         .await?
         .error_for_status()?;
-    let directory = claude_proxy_service::local_directory()?.join("downloads");
-    std::fs::create_dir_all(&directory)?;
-    let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
     use std::io::Write;
     let mut hash = Sha256::new();
     let mut total = 0;
@@ -152,35 +166,12 @@ pub async fn update() -> Result<String> {
         .context("Otra actualización del servidor está en curso")?;
     let installed = binary_version(&destination)?;
     println!("Buscando la última versión estable del servidor local (actual: {installed})…");
-    let release = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .https_only(true)
-        .user_agent("claude-proxy-cli")
-        .build()?
-        .head("https://github.com/ruxwez/claude-proxy/releases/latest")
-        .send()
-        .await?
-        .error_for_status()?;
-    ensure!(
-        release.url().host_str() == Some("github.com"),
-        "Origen de release inválido"
-    );
-    let tag = release
-        .url()
-        .path()
-        .strip_prefix("/ruxwez/claude-proxy/releases/tag/")
-        .context("Release sin tag")?;
-    let latest = semver::Version::parse(tag.strip_prefix('v').context("Tag de release inválido")?)?;
-    ensure!(latest.pre.is_empty(), "La release no es estable");
+    let latest = crate::updates::latest().await?;
     if latest <= installed {
         return Ok(format!("Servidor local {installed}: ya está actualizado"));
     }
     // Verify and stage everything while the old server is still running.
     let downloaded = download_version(&latest.to_string()).await?;
-    ensure!(
-        binary_version(&downloaded)? == latest,
-        "La versión del binario no coincide con la release"
-    );
     let mut staged = tempfile::NamedTempFile::new_in(&directory)?;
     std::io::copy(&mut std::fs::File::open(downloaded)?, &mut staged)?;
     staged.as_file().sync_all()?;
@@ -209,7 +200,11 @@ pub async fn update() -> Result<String> {
         })
     };
     replace_server(&destination, &staged, &mut manage, |updated| {
-        wait_local_health(updated.then(|| latest.to_string()))
+        wait_local_health(if updated {
+            latest.to_string()
+        } else {
+            installed.to_string()
+        })
     })
     .await?;
     Ok(format!(
@@ -217,25 +212,34 @@ pub async fn update() -> Result<String> {
     ))
 }
 
-async fn wait_local_health(expected: Option<String>) -> Result<()> {
+async fn wait_local_health(expected: String) -> Result<()> {
     let http = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(1))
         .build()?;
-    for _ in 0..30 {
-        if let Ok(response) = http.get("http://127.0.0.1:10800/health").send().await
+    wait_health(&http, "http://127.0.0.1:10800/health", &expected, 30).await
+}
+
+async fn wait_health(
+    http: &reqwest::Client,
+    endpoint: &str,
+    expected: &str,
+    attempts: usize,
+) -> Result<()> {
+    for attempt in 0..attempts {
+        if let Ok(response) = http.get(endpoint).send().await
             && response.status().is_success()
             && let Ok(value) = response.json::<serde_json::Value>().await
             && value["status"] == "ok"
             && value["implementation"] == "rust"
-            && expected
-                .as_ref()
-                .is_none_or(|version| value["version"].as_str() == Some(version.as_str()))
+            && value["version"].as_str() == Some(expected)
         {
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if attempt + 1 < attempts {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
     }
     anyhow::bail!("El servidor actualizado no respondió en el puerto local 10800")
 }
@@ -365,5 +369,112 @@ mod update_tests {
             "settings and credentials"
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use axum::{Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get};
+
+    #[tokio::test]
+    async fn health_requires_the_expected_version_and_rust_server_identity() {
+        let router = Router::new()
+            .route("/health", get(|| async { axum::Json(serde_json::json!({"status":"ok","implementation":"rust","version":"1.2.3"})) }))
+            .route("/foreign", get(|| async { axum::Json(serde_json::json!({"status":"ok","implementation":"other","version":"1.2.3"})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        assert!(
+            wait_health(&http, &format!("{endpoint}/health"), "1.2.3", 1)
+                .await
+                .is_ok()
+        );
+        assert!(
+            wait_health(&http, &format!("{endpoint}/health"), "1.2.4", 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            wait_health(&http, &format!("{endpoint}/foreign"), "1.2.3", 1)
+                .await
+                .is_err()
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn checksum_failures_and_missing_assets_preserve_existing_download() {
+        let router = Router::new().route(
+            "/{asset}",
+            get(|Path(asset): Path<String>| async move {
+                match asset.as_str() {
+                    "good.sha256" => {
+                        format!("{:x}  good\n", Sha256::digest(b"verified-binary")).into_response()
+                    }
+                    "good" | "bad" => "verified-binary".into_response(),
+                    "bad.sha256" => "0".repeat(64).into_response(),
+                    "malformed.sha256" => "invalid-checksum".into_response(),
+                    _ => StatusCode::NOT_FOUND.into_response(),
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join(name());
+        std::fs::write(&destination, "existing").unwrap();
+        for asset in ["bad", "malformed", "missing"] {
+            assert!(
+                download_asset(&http, &endpoint, asset, directory.path())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&destination).unwrap(), "existing");
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+        let path = download_asset(&http, &endpoint, "good", directory.path())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "verified-binary");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_start_restores_previous_binary_and_restarts_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join(name());
+        let staged = directory.path().join("new");
+        std::fs::write(&destination, "old").unwrap();
+        std::fs::write(&staged, "new").unwrap();
+        let mut actions = Vec::new();
+        let mut health_checks = Vec::new();
+        let result = replace_server(
+            &destination,
+            &staged,
+            &mut |start| {
+                actions.push(start);
+                if actions.len() == 2 {
+                    anyhow::bail!("new service failed to start");
+                }
+                Ok(())
+            },
+            |updated| {
+                health_checks.push(updated);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(actions, [false, true, false, true]);
+        assert_eq!(health_checks, [false]);
+        assert_eq!(std::fs::read_to_string(destination).unwrap(), "old");
     }
 }

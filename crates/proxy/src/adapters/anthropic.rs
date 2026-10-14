@@ -7,7 +7,8 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
+    body::{Bytes, to_bytes},
+    extract::{DefaultBodyLimit, Path, Query, State, rejection::BytesRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -97,11 +98,6 @@ enum ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         Self::Upstream(error)
-    }
-}
-impl From<JsonRejection> for ApiError {
-    fn from(error: JsonRejection) -> Self {
-        Self::Invalid(error.body_text())
     }
 }
 impl IntoResponse for ApiError {
@@ -266,17 +262,114 @@ fn find_provider<'a>(proxy: &'a Proxy, id: &'a str) -> Result<(&'a Provider, &'a
 async fn messages(
     State(proxy): State<Arc<Proxy>>,
     headers: HeaderMap,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(req) = payload?;
+    payload: Result<Bytes, BytesRejection>,
+) -> Response {
+    traced_request(&proxy, headers, payload, false).await
+}
+
+async fn count_tokens(
+    State(proxy): State<Arc<Proxy>>,
+    headers: HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Response {
+    traced_request(&proxy, headers, payload, true).await
+}
+
+async fn traced_request(
+    proxy: &Proxy,
+    headers: HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+    count_tokens: bool,
+) -> Response {
     let capture = proxy
         .traces
         .as_ref()
         .and_then(|t| t.start(&proxy.trace_policy));
     if let Some(trace) = &capture {
-        trace.stage("client_request", &req);
+        trace.operation(if count_tokens {
+            "count_tokens"
+        } else {
+            "messages"
+        });
         trace.finish("invalid_request");
     }
+    let result = async {
+        let bytes = payload.map_err(|error| {
+            if let Some(trace) = &capture {
+                trace.omitted_stage("client_request", "request_body_unavailable");
+            }
+            ApiError::Invalid(error.body_text())
+        })?;
+        let decoded = serde_json::from_slice::<Value>(&bytes);
+        if let Some(trace) = &capture {
+            trace.stage(
+                "client_request",
+                &decoded
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+            );
+        }
+        let json_content = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .is_some_and(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "application/json" || (v.starts_with("application/") && v.ends_with("+json"))
+            });
+        if !json_content {
+            return Err(ApiError::Invalid(
+                "Content-Type debe ser application/json".into(),
+            ));
+        }
+        let req = decoded.map_err(|error| ApiError::Invalid(format!("JSON inválido: {error}")))?;
+        if count_tokens {
+            count_tokens_inner(proxy, headers, req, capture.as_ref()).await
+        } else {
+            messages_inner(proxy, headers, req, capture.clone()).await
+        }
+    }
+    .await;
+    let mut response = match result {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    };
+    // Errors and token counts are finite JSON. Record the actual body at the common
+    // boundary, including failures which exited the handler through `?`.
+    if count_tokens || response.status().is_client_error() || response.status().is_server_error() {
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+        if let Some(trace) = &capture {
+            trace.stage(
+                "client_response",
+                &serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+            );
+        }
+        if count_tokens
+            && parts.status.is_success()
+            && let Some(trace) = &capture
+        {
+            trace.finish("completed");
+        }
+        response = Response::from_parts(parts, axum::body::Body::from(bytes));
+    }
+    if let Some(trace) = &capture {
+        response.headers_mut().insert(
+            "x-claude-proxy-trace-id",
+            HeaderValue::from_str(&trace.id()).unwrap(),
+        );
+    }
+    response
+}
+
+async fn messages_inner(
+    proxy: &Proxy,
+    headers: HeaderMap,
+    req: Value,
+    capture: Option<crate::traces::Capture>,
+) -> Result<Response, ApiError> {
     let id = req["model"].as_str().unwrap_or_default().trim();
     if id.is_empty()
         || req["max_tokens"].as_u64().unwrap_or(0) == 0
@@ -286,7 +379,7 @@ async fn messages(
             "model, max_tokens > 0 y messages no vacío son requeridos".into(),
         ));
     }
-    let (p, target) = find_provider(&proxy, id)?;
+    let (p, target) = find_provider(proxy, id)?;
     let protocol = selected_protocol(&p.config.name, target, &proxy.protocols);
     if let Some(trace) = &capture {
         trace.route(id, protocol);
@@ -344,7 +437,11 @@ async fn messages(
         let bytes = read_limited(upstream, 1024 * 1024).await?;
         let raw = serde_json::from_slice::<Value>(&bytes).ok();
         if let Some(trace) = &capture {
-            trace.stage("upstream_response", raw.as_ref().unwrap_or(&Value::Null));
+            trace.stage(
+                "upstream_response",
+                raw.as_ref()
+                    .unwrap_or(&json!(String::from_utf8_lossy(&bytes))),
+            );
             trace.finish("upstream_error");
         }
         if protocol == Protocol::Messages
@@ -371,12 +468,19 @@ async fn messages(
     } else if req["stream"].as_bool().unwrap_or(false) {
         stream::response_traced(upstream, protocol, id.to_string(), &req, capture.clone())
     } else {
-        let raw: Value = serde_json::from_slice(&read_limited(upstream, 32 * 1024 * 1024).await?)
-            .context("JSON del proveedor inválido")?;
+        let bytes = read_limited(upstream, 32 * 1024 * 1024).await?;
+        let decoded = serde_json::from_slice::<Value>(&bytes);
         if let Some(trace) = &capture {
-            trace.stage("upstream_response", &raw);
+            trace.stage(
+                "upstream_response",
+                &decoded
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+            );
             trace.finish("conversion_error");
         }
+        let raw = decoded.context("JSON del proveedor inválido")?;
         let mut converted = translate::response(&raw, id, protocol)?;
         if protocol != Protocol::Messages {
             translate::restore_tool_names(&mut converted, &req);
@@ -435,15 +539,18 @@ async fn read_limited(mut response: reqwest::Response, max: usize) -> Result<Vec
     Ok(bytes)
 }
 
-async fn count_tokens(
-    State(proxy): State<Arc<Proxy>>,
+async fn count_tokens_inner(
+    proxy: &Proxy,
     headers: HeaderMap,
-    payload: Result<Json<Value>, JsonRejection>,
+    req: Value,
+    capture: Option<&crate::traces::Capture>,
 ) -> Result<Response, ApiError> {
-    let Json(req) = payload?;
     if let Some(id) = req["model"].as_str() {
-        let (provider, model) = find_provider(&proxy, id)?;
+        let (provider, model) = find_provider(proxy, id)?;
         let protocol = selected_protocol(&provider.config.name, model, &proxy.protocols);
+        if let Some(trace) = capture {
+            trace.route(id, protocol);
+        }
         if protocol != Protocol::Chat && provider.config.zed.is_none() {
             let body = translate::count_request(
                 &req,
@@ -457,6 +564,11 @@ async fn count_tokens(
             } else {
                 "/responses/input_tokens"
             };
+            if let Some(trace) = capture {
+                trace.stage("upstream_request", &body);
+                trace.finish("transport_error");
+            }
+            let started = Instant::now();
             let upstream = provider
                 .post_path(path, protocol, &headers)
                 .json(&body)
@@ -465,10 +577,28 @@ async fn count_tokens(
                 .context("Conteo del proveedor no alcanzable")?;
             let status = upstream.status();
             let transport = forward_headers(upstream.headers());
+            let retry = upstream.headers().get(RETRY_AFTER).cloned();
+            if let Some(trace) = capture {
+                trace.transport(status.as_u16(), started.elapsed().as_millis());
+            }
+            let bytes = read_limited(upstream, 1024 * 1024).await?;
+            let decoded = serde_json::from_slice::<Value>(&bytes);
+            if let Some(trace) = capture {
+                trace.stage(
+                    "upstream_response",
+                    &decoded
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+                );
+                trace.finish(if status.is_success() {
+                    "conversion_error"
+                } else {
+                    "upstream_error"
+                });
+            }
             if status.is_success() {
-                let raw: Value =
-                    serde_json::from_slice(&read_limited(upstream, 1024 * 1024).await?)
-                        .context("Conteo del proveedor inválido")?;
+                let raw = decoded.context("Conteo del proveedor inválido")?;
                 let count = raw["input_tokens"]
                     .as_u64()
                     .context("Conteo del proveedor sin input_tokens")?;
@@ -482,9 +612,7 @@ async fn count_tokens(
             // Only an absent endpoint permits estimation. Authentication, rate
             // limits and invalid input must remain explicit provider failures.
             if !matches!(status.as_u16(), 404 | 405 | 501) {
-                let retry = upstream.headers().get(RETRY_AFTER).cloned();
-                let raw = read_limited(upstream, 1024 * 1024).await?;
-                let value = serde_json::from_slice::<Value>(&raw).ok();
+                let value = decoded.ok();
                 if protocol == Protocol::Messages
                     && let Some(value) = value.as_ref().filter(|v| v["type"] == "error")
                 {
@@ -497,6 +625,9 @@ async fn count_tokens(
                 let mut response = ApiError::Provider(status, message, retry).into_response();
                 response.headers_mut().extend(transport);
                 return Ok(response);
+            }
+            if let Some(trace) = capture {
+                trace.warnings(&["token_count_endpoint_unavailable_estimated_locally"]);
             }
             // The endpoint can be unavailable while still reporting a real quota.
             let mut response = estimated_count(&req);

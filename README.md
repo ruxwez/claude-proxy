@@ -149,6 +149,14 @@ binario anterior. Conserva bases de datos, credenciales y configuración del
 servicio. Puede solicitar sudo/UAC. La acción afecta solo a este equipo, aunque
 el CLI esté conectado a otro servidor; no hay actualizaciones en segundo plano.
 
+El CLI comprueba la última release estable en segundo plano al abrir el panel.
+Muestra avisos independientes de **nueva versión del CLI** y **nueva versión del
+servidor proxy** conectado, que permanecen visibles durante la sesión. Los
+fallos de red no bloquean el panel. `claude-proxy config check` también muestra
+estos avisos. `service update` actualiza únicamente el servidor local; para
+actualizar el CLI, descarga el paquete de la release o reinstálalo con
+`cargo install --locked claude-proxy-cli` si utilizas Cargo.
+
 Las instrucciones completas de Docker, ejecución nativa y servicios están en
 [docs/deployment.md](docs/deployment.md).
 
@@ -254,38 +262,77 @@ detección de ediciones concurrentes. Un catálogo vacío/incorrecto no sobrescr
 El destino predeterminado es `$CLAUDE_CONFIG_DIR/settings.json` o
 `~/.claude/settings.json`. Reinicia Claude Code después de sincronizar.
 
+## Adaptación de effort
+
+Los niveles admitidos se declaran en el motor de traducción. Si el nivel pedido
+no existe, se selecciona el más cercano según
+`minimal → low → medium → high → xhigh → ultra`. En empates se elige el superior:
+DeepSeek convierte `medium` a `high`, y `xhigh`/`ultra` a `high`; Claude convierte
+`xhigh` a `high`. El selector también permite subir `high` a `xhigh` cuando este
+es el nivel disponible más cercano. Los controles del historial usan la misma
+regla y no se modifica la petición de entrada.
+
+`max` se excluye de la búsqueda por proximidad. Solo una selección explícita de
+`max` puede activar ese modo. Se conserva su adaptación anterior para modelos
+OpenAI que no lo admiten (al nivel superior disponible). Los modelos desconocidos
+conservan su tratamiento genérico. Las adaptaciones se declaran en las trazas y,
+cuando corresponde, en `x-claude-proxy-warnings`.
+
 ## Trazabilidad: issue #2
 
-La captura está desactivada inicialmente. Al activarla, guarda **solo metadatos**:
-modelo, protocolo, estado HTTP, tiempo hasta cabeceras, etapas de conversión,
-contadores de herramientas/razonamiento/multimedia, tipos de eventos SSE y
-adaptaciones esperadas. Cada petición recibe `x-claude-proxy-trace-id`.
+La opción `traces.debug` controla la persistencia:
 
-Las etapas son `client_request`, `upstream_request`, `upstream_response` y
-`client_response`; en streaming, las respuestas se registran como secuencias
-`upstream_event`/`client_event`. Se distinguen peticiones inválidas, fallos de
-transporte/proveedor, errores de conversión/stream, cancelaciones y finalización.
-Los avisos de adaptación no se etiquetan automáticamente como pérdidas. En JSON,
-el motor comprueba pérdidas de IDs, nombres, argumentos y cantidad de
-herramientas, además del texto Chat; las paradas locales se clasifican como
-cambios esperados. En SSE, la máquina de estados detecta herramientas incompletas
-y finales ausentes. No es un verificador semántico exhaustivo.
+```json
+{"traces": {"debug": false}}
+```
 
-Escribir exactamente `CAPTURAR CONTENIDO` en el formulario concede captura
-completa durante una hora. La API admite un vencimiento explícito de hasta 24
-horas. El consentimiento caducado vuelve automáticamente a metadatos. Las
-cabeceras HTTP nunca se capturan; los campos de credenciales se redactan incluso
-con consentimiento. El contenido del usuario puede contener secretos arbitrarios:
-la captura completa es deliberadamente explícita.
+- `false` (predeterminado): guarda solo fallos de autenticación, petición,
+  transporte, proveedor, conversión y stream, cancelaciones y pérdidas confirmadas.
+  Incluye el error enviado al cliente y metadatos de las etapas recorridas.
+- `true`: guarda todas las peticiones con contenido completo, incluidos los
+  eventos de streaming, hasta que se desactive desde **Trazas → Configurar** o
+  `PUT /api/settings`. No caduca después de una hora.
 
-La retención es de 1–168 horas. Las trazas se guardan siempre en
-`server/traces.sqlite3`, también si los ajustes usan PostgreSQL/MySQL. Se purgan al
-consultar y al escribir, y cada minuto. Límites: 2.000 trazas, 512 observaciones y
-2 MiB por traza; una etapa completa admite hasta 128 KiB. Los eventos descartados
-se contabilizan. Una cola acotada de escritura evita bloquear la generación; si se
-satura, se registra el descarte en el log. Al finalizar una petición se persiste su
-traza, incluidos cancelaciones y streams truncados. Las exportaciones se guardan
-en `diagnostics/` dentro de la configuración del CLI.
+Las cuatro etapas son `client_request`, `upstream_request`, `upstream_response`
+y `client_response`. En streaming, las respuestas se registran como secuencias
+`upstream_event`/`client_event`; se conserva también `[DONE]`. Cada etapa declara
+su frontera (`claude_to_proxy`, `proxy_to_provider`, `provider_to_proxy`,
+`proxy_to_claude`), secuencia, tiempo transcurrido y observaciones. El conteo de
+tokens usa el mismo registro; si se estima localmente, no inventa etapas del
+proveedor. Los fallos anteriores al envío solo tienen las etapas alcanzadas.
+Cada petición recibe `x-claude-proxy-trace-id`, incluso si falla. El rechazo de
+una clave del proxy sigue siendo inmediato, sin leer su cuerpo; las etapas
+imposibles de capturar declaran `content_omitted` y el motivo.
+
+En debug, `content` contiene el JSON observado (o texto si el proveedor no
+entrega JSON). La petición enviada y la respuesta final incluyen `changes` y
+`compared_to`: diferencias declarativas por JSON Pointer, con `added`, `removed`
+o `modified` y valores `before`/`after`. Las secuencias SSE conservan todos sus
+payloads y el orden de observación; no se emparejan eventos de protocolos
+distintos como si fueran equivalentes. Los eventos intermedios del recolector
+Zed se etiquetan `proxy_event`, sin confundirlos con la salida al cliente.
+
+Las cabeceras HTTP no se capturan y los campos de credenciales se redactan antes
+de guardar contenido o calcular diferencias. El JSON conserva sus valores, no
+la representación original de espacios ni la fragmentación de transporte.
+El contenido completo de debug puede incluir datos sensibles del usuario.
+Los contadores y avisos de adaptación no demuestran por sí solos ausencia de
+pérdidas. Las comprobaciones de pérdidas de herramientas y texto se mantienen;
+las paradas locales se consideran cambios esperados.
+
+La retención es una **ventana móvil de siete días** en ambos modos. Las trazas
+se guardan en `server/traces.sqlite3`, también si los ajustes usan PostgreSQL o
+MySQL. Se purgan al arrancar, al consultar, al escribir y cada minuto. No se
+borran por alcanzar 2.000 registros. Debug conserva todos los eventos y payloads
+sin los anteriores límites de 512 eventos, 128 KiB por etapa o 2 MiB por traza;
+el modo normal acota sus observaciones y declara `dropped_events`. El contenido
+de una traza en curso se mantiene en memoria. La cola de escritura está acotada:
+si se llena, se persiste directamente sin descartar la traza. El cierre ordenado
+del servidor vacía las escrituras pendientes. Las exportaciones se guardan en
+`diagnostics/` dentro de la configuración del CLI.
+
+Los campos antiguos `enabled`, `full_until` y `retention_hours` ya no controlan
+la captura: sin `debug`, se aplica el modo de solo errores y siete días.
 
 La visibilidad cubre únicamente cliente ↔ proxy ↔ proveedor. No permite observar
 el tráfico interno OpenCode Go ↔ DeepSeek ni demostrar ausencia de pérdidas solo

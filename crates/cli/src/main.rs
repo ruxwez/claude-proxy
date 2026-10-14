@@ -14,6 +14,7 @@ mod callback;
 mod control;
 mod installation;
 mod tui;
+mod updates;
 
 #[derive(Parser)]
 #[command(version, about = "Panel de control Claude Proxy")]
@@ -99,6 +100,7 @@ async fn configuration(action: ConfigAction) -> Result<()> {
                 client.endpoint,
                 status["version"].as_str().unwrap_or("desconocida")
             );
+            updates::print_notices(status["version"].as_str()).await;
         }
     }
     Ok(())

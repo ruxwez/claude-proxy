@@ -19,7 +19,11 @@ impl Panel {
             return;
         }
         let [heading, body, footer] = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(if self.version_notice().is_empty() {
+                2
+            } else {
+                4
+            }),
             Constraint::Min(4),
             Constraint::Length(4),
         ])
@@ -34,8 +38,10 @@ impl Panel {
         .split(content);
         frame.render_widget(
             Paragraph::new(format!(
-                " claude-proxy  ·  Panel de control\n {}",
-                self.client.endpoint
+                " claude-proxy v{} · Panel de control\n {}\n {}",
+                env!("CARGO_PKG_VERSION"),
+                self.client.endpoint,
+                self.version_notice()
             ))
             .style(Style::default().fg(Color::Cyan)),
             heading,
@@ -75,7 +81,7 @@ impl Panel {
                     "Revisa la acción. Escribe ELIMINAR y confirma en Guardar cambios; Esc cancela."
                 }
                 Action::TracePolicy => {
-                    "La captura usa metadatos. El contenido completo requiere tu consentimiento por 1 hora."
+                    "Debug registra todas las peticiones con contenido. Desactivado guarda solo errores. Retención: siete días."
                 }
                 _ => {
                     "Enter avanza al siguiente campo. Las opciones se eligen con ←→. Al final, Guardar cambios."
@@ -147,7 +153,7 @@ impl Panel {
                 areas[1],
             );
         } else if self.tab == 4 {
-            frame.render_widget(Paragraph::new(format!("Endpoint: {}\nClave: {}\n\nEnter: conexión, conectividad y servicio local.\nU: actualizar servidor local a la última versión estable.\nLa actualización reinicia el servicio y conserva los datos.\nSincroniza con Claude Code después de cambiar de servidor.",self.client.endpoint,if self.client.key.is_empty(){"sin configurar"}else{"configurada"})).wrap(Wrap{trim:false}).block(panel_block("Conexión",!self.sidebar)),areas[1]);
+            frame.render_widget(Paragraph::new(format!("Endpoint: {}\nClave: {}\n\nEnter: conexión, conectividad y servicio local.\nU: actualizar servidor local a la última versión estable.\nLa actualización reinicia el servicio y conserva los datos.\nCLI: descarga la nueva versión desde GitHub Releases.\nSincroniza con Claude Code después de cambiar de servidor.",self.client.endpoint,if self.client.key.is_empty(){"sin configurar"}else{"configurada"})).wrap(Wrap{trim:false}).block(panel_block("Conexión",!self.sidebar)),areas[1]);
         } else if self.tab == 2 {
             let settings = &self.settings;
             let content = format!(
@@ -220,10 +226,10 @@ impl Panel {
                     format!(
                         "Trazas · página {} · captura {}",
                         self.trace_cursors.len() + 1,
-                        if self.settings["traces"]["enabled"] == true {
-                            "activa"
+                        if self.settings["traces"]["debug"] == true {
+                            "debug: todas"
                         } else {
-                            "desactivada"
+                            "solo errores"
                         }
                     ),
                     self.traces

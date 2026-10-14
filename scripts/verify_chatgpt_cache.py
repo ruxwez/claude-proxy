@@ -36,7 +36,7 @@ def main():
     model = "gpt-6-luna"
     public_model = provider["id"] + "/" + model
     provider["models"] = [{"id": model, "display_name": "GPT-6 Luna", "protocol": "responses", "credential": "subscription", "enabled": True}]
-    settings.update(providers=[provider], default_model=public_model, timeout_seconds=30, traces={"enabled": False})
+    settings.update(providers=[provider], default_model=public_model, timeout_seconds=30, traces={"debug": False})
     environment = {k: v for k, v in os.environ.items() if k not in {"AUTH_KEY", "DATABASE_URL", "PROXY_PUBLIC_URL"}}
     root = Path(__file__).resolve().parents[1]
     executable = root / "target/debug" / ("claude-proxy-server.exe" if os.name == "nt" else "claude-proxy-server")
